@@ -5,6 +5,8 @@ A Flask-based web interface for generating G-code from DXF files
 """
 
 from flask import Flask, render_template, request, jsonify, send_file, session, send_from_directory, redirect
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 from werkzeug.middleware.proxy_fix import ProxyFix
 import os
 import sys
@@ -81,6 +83,16 @@ else:
         def is_authenticated(self):
             return True
     auth = DummyAuth()
+
+# Initialize rate limiting
+limiter = Limiter(
+    app=app,
+    key_func=get_remote_address,
+    default_limits=["200 per hour"],  # Global default for all routes
+    storage_uri="memory://",
+    headers_enabled=True  # Send X-RateLimit headers in responses
+)
+print("✅ Rate limiting enabled (200 requests/hour default)")
 
 # Directory for temporary files
 TEMP_DIR = tempfile.mkdtemp()
@@ -216,6 +228,7 @@ def index():
     return render_template('index.html')
 
 @app.route('/process', methods=['POST'])
+@limiter.limit("10 per minute")  # Strict limit - CPU intensive operation
 @auth.require_auth
 def process_file():
     """Process uploaded DXF file and generate G-code"""
@@ -521,6 +534,7 @@ def drive_status():
         })
 
 @app.route('/drive/upload/<filename>', methods=['POST'])
+@limiter.limit("30 per minute")  # Reasonable limit for uploads
 @auth.require_auth
 def upload_to_drive(filename):
     """Upload a G-code file to Google Drive"""
@@ -805,6 +819,7 @@ def onshape_body_faces():
         }), 500
 
 @app.route('/onshape/import', methods=['GET', 'POST'])
+@limiter.limit("20 per minute")  # Moderate limit - authenticated via Onshape OAuth
 @auth.require_auth
 def onshape_import():
     """
@@ -880,7 +895,41 @@ def onshape_import():
 
             # Redirect to Onshape OAuth
             return redirect('/onshape/auth')
-        
+
+        # === TEST: Fetch user info, company info, and config file from Onshape ===
+        print("\n" + "="*60)
+        print("TESTING: Fetching user, company, and config info")
+        print("="*60)
+
+        # 1. Get user session info
+        print("\n1️⃣  User Session Info:")
+        user_session = client.get_user_session_info()
+        if user_session:
+            print(f"   Name: {user_session.get('name')}")
+            print(f"   Email: {user_session.get('email')}")
+            print(f"   ID: {user_session.get('id', 'N/A')}")
+
+        # 2. Get document's owning company
+        print("\n2️⃣  Document Company:")
+        doc_company = client.get_document_company(document_id)
+        if doc_company:
+            print(f"   Company Name: {doc_company.get('name')}")
+            print(f"   Company ID: {doc_company.get('id')}")
+        else:
+            print("   No company found (document may be owned by user)")
+
+        # 3. Get team config file
+        print("\n3️⃣  Team Configuration File:")
+        team_config = client.fetch_config_file()
+        if team_config:
+            print("   ✅ Successfully fetched team configuration:")
+            print(json.dumps(team_config, indent=2))
+        else:
+            print("   ⚠️  No team configuration found (this is OK for testing)")
+
+        print("\n" + "="*60 + "\n")
+        # === END TEST ===
+
         # If no face_id provided, auto-select the top face
         part_name_from_body = None
         auto_selected_body_id = None
@@ -1066,6 +1115,7 @@ def onshape_import():
         }), 500
 
 @app.route('/onshape/save-dxf', methods=['GET', 'POST'])
+@limiter.limit("20 per minute")  # Moderate limit - authenticated via Onshape OAuth
 @auth.require_auth
 def onshape_save_dxf():
     """
