@@ -2413,7 +2413,7 @@ class FRCPostProcessor:
         gcode.append('')
         gcode.append('( === PROGRAM END === )')
         gcode.append('G53 G0 Z0.  ; Move to machine Z0 (safe clearance)')
-        gcode.append('G53 G0 X0.5 Y23.5  ; Park at back of machine')
+        gcode.append('G53 G0 X0.5 Y-6  ; Park at back of machine')
         gcode.append('M9  ; Air blast off')
         gcode.append('M5')
         gcode.append('G54  ; Reset to standard work coordinate system')
