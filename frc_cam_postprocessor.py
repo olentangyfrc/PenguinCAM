@@ -1045,7 +1045,7 @@ class FRCPostProcessor:
         gcode.append("G53 G0 Z0.  ; Move to machine coordinate Z0 (safe clearance)")
         gcode.append("M9  ; Air blast off")
         gcode.append("M5  ; Spindle off")
-        gcode.append("G53 G0 X0.5 Y-6  ; Move gantry to back of machine for easy access")
+        gcode.append("(G53 G0 X0.5 Y-6  ; Move gantry to back of machine for easy access)")
         gcode.append("M30  ; Program end")
         gcode.append("")
 
