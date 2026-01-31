@@ -81,8 +81,8 @@ MATERIAL_PRESETS = {
     },
     'polycarbonate': {
         'name': 'Polycarbonate',
-        'feed_rate': 75.0,        # Same as plywood
-        'ramp_feed_rate': 50.0,   # Same as plywood
+        'feed_rate': 50.0,        # Same as plywood
+        'ramp_feed_rate': 30.0,   # Same as plywood
         'plunge_rate': 20.0,      # Same as plywood - matches Fusion 360
         'spindle_speed': 18000,   # RPM
         'ramp_angle': 20.0,       # Same as plywood
