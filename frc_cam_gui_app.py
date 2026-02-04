@@ -460,11 +460,13 @@ def index():
 def process_file():
     """Process uploaded DXF file and generate G-code"""
     try:
+
         # Get uploaded file
         if 'file' not in request.files:
             return jsonify({'error': 'No file uploaded'}), 400
 
         file = request.files['file']
+        print("received file " + file.filename)
         if file.filename == '':
             return jsonify({'error': 'No file selected'}), 400
 
