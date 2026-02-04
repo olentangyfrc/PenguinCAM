@@ -26,6 +26,8 @@ from urllib.parse import urlencode
 import ezdxf
 import logging
 
+import team_config
+
 # Configure logging for Vercel
 logging.basicConfig(
     level=logging.INFO,
@@ -411,24 +413,24 @@ def index():
     team_name = session.get('team_name')
 
     # Reconstruct TeamConfig
-    team_config_data = session.get('team_config_data', {})
-    team_config = TeamConfig(team_config_data)
+    TeamConfig_data = session.get('TeamConfig_data', {})
+    TeamConfig = team_config.TeamConfig(TeamConfig_data)
 
     # Get available machines
-    machines = team_config.get_available_machines()
+    machines = TeamConfig.get_available_machines()
 
     # Get current machine (from session, or use default)
-    current_machine_id = session.get('machine_id', team_config.default_machine_id)
+    current_machine_id = session.get('machine_id', TeamConfig.default_machine_id)
 
     # Get machine-specific config dict
-    team_config_dict = team_config.to_dict(current_machine_id)
-    drive_enabled = team_config_dict.get('google_drive_enabled', False)
-    default_tool_diameter = team_config_dict.get('default_tool_diameter', 0.157)
-    machine_x_max = team_config_dict.get('machine_x_max', 48.0)
-    machine_y_max = team_config_dict.get('machine_y_max', 96.0)
+    TeamConfig_dict = TeamConfig.to_dict(current_machine_id)
+    drive_enabled = TeamConfig_dict.get('google_drive_enabled', False)
+    default_tool_diameter = TeamConfig_dict.get('default_tool_diameter', 0.157)
+    machine_x_max = TeamConfig_dict.get('machine_x_max', 48.0)
+    machine_y_max = TeamConfig_dict.get('machine_y_max', 96.0)
 
     # Get available materials for current machine
-    available_materials = team_config.get_available_materials(current_machine_id)
+    available_materials = TeamConfig.get_available_materials(current_machine_id)
 
     # Add 'aluminum_tube' as a special UI-only material (uses aluminum preset)
     available_materials['aluminum_tube'] = {
@@ -439,7 +441,7 @@ def index():
     # Check for incomplete materials (custom materials missing required params)
     incomplete_materials = {
         material_id for material_id in available_materials.keys()
-        if not team_config.is_material_complete(material_id, current_machine_id) and material_id != 'aluminum_tube'
+        if not TeamConfig.is_material_complete(material_id, current_machine_id) and material_id != 'aluminum_tube'
     }
 
     return render_template('index.html',
@@ -463,14 +465,14 @@ def process_file():
         # Get uploaded file
         if 'file' not in request.files:
             return jsonify({'error': 'No file uploaded'}), 400
-        
+
         file = request.files['file']
         if file.filename == '':
             return jsonify({'error': 'No file selected'}), 400
-        
+
         if not file.filename.lower().endswith('.dxf'):
             return jsonify({'error': 'File must be a DXF file'}), 400
-        
+
         # Get parameters
         material = request.form.get('material', 'plywood')
         is_aluminum_tube = (material.lower() == 'aluminum_tube')
@@ -565,9 +567,9 @@ def process_file():
         log(f"🚀 Running post-processor API...")
 
         # Get team config from session (if available)
-        config_data = session.get('team_config_data', {})
-        team_config = TeamConfig.from_dict(config_data)
-        log(f"📋 Using team config: {team_config}")
+        config_data = session.get('TeamConfig_data', {})
+        TeamConfig = team_config.TeamConfig.from_dict(config_data)
+        log(f"📋 Using team config: {TeamConfig}")
 
         # Call post-processor API based on mode
         try:
@@ -577,7 +579,7 @@ def process_file():
                     material_thickness=thickness,
                     tool_diameter=tool_diameter,
                     units='inch',
-                    config=team_config
+                    config=TeamConfig
                 )
 
                 # Store tube height for Z-offset calculations
@@ -613,7 +615,7 @@ def process_file():
                     material_thickness=thickness,
                     tool_diameter=tool_diameter,
                     units='inch',
-                    config=team_config
+                    config=TeamConfig
                 )
 
                 # Apply material preset (for specific machine if selected)
@@ -781,9 +783,9 @@ def drive_status():
         })
 
     # Check team config to see if Drive is enabled
-    team_config = session.get('team_config', {})
-    drive_enabled = team_config.get('google_drive_enabled', False)
-    folder_id = team_config.get('google_drive_folder_id')
+    TeamConfig = session.get('TeamConfig', {})
+    drive_enabled = TeamConfig.get('google_drive_enabled', False)
+    folder_id = TeamConfig.get('google_drive_folder_id')
 
     if not drive_enabled or not folder_id:
         return jsonify({
@@ -855,7 +857,7 @@ def upload_to_drive(token):
                 'success': False,
                 'message': 'File not found'
             }), 404
-        
+
         # Get credentials from session
         creds = None
         if AUTH_AVAILABLE and auth.is_enabled():
@@ -868,11 +870,11 @@ def upload_to_drive(token):
                     'message': 'Not authenticated with Google Drive'
                 }), 401
             log(f"✅ Got credentials, scopes: {creds.scopes if hasattr(creds, 'scopes') else 'unknown'}")
-        
+
         # Create uploader with credentials
         log("🔧 Creating GoogleDriveUploader...")
         uploader = GoogleDriveUploader(credentials=creds)
-        
+
         log("🔐 Authenticating...")
         if not uploader.authenticate():
             log("❌ Authentication failed")
@@ -880,7 +882,7 @@ def upload_to_drive(token):
                 'success': False,
                 'message': 'Failed to authenticate with Google Drive'
             }), 500
-        
+
         log("✅ Authenticated, uploading file...")
         # Upload the file with real filename
         result = uploader.upload_file(file_path, real_filename)
@@ -901,7 +903,7 @@ def upload_to_drive(token):
                 'success': False,
                 'message': result.get('message') if result else 'Upload failed'
             }), 500
-            
+
     except Exception as e:
         return jsonify({
             'success': False,
@@ -934,7 +936,7 @@ def onshape_auth():
 
         # Redirect user to Onshape for authorization
         return redirect(auth_url)
-        
+
     except Exception as e:
         return jsonify({'error': f'OAuth initialization failed: {str(e)}'}), 500
 
@@ -987,16 +989,16 @@ def onshape_oauth_callback():
         # Get team config file
         config_yaml = client.fetch_config_file()
         if config_yaml:
-            team_config = TeamConfig.from_yaml(config_yaml)
-            log(f"✅ Team config loaded: {team_config.team_name} (#{team_config.team_number})")
-            session['team_config_data'] = team_config._data
-            session['team_config'] = team_config.to_dict()
+            TeamConfig = team_config.TeamConfig.from_yaml(config_yaml)
+            log(f"✅ Team config loaded: {TeamConfig.team_name} (#{TeamConfig.team_number})")
+            session['TeamConfig_data'] = TeamConfig._data
+            session['TeamConfig'] = TeamConfig.to_dict()
             session['using_default_config'] = False
         else:
             log("⚠️  No team config found - using defaults")
-            team_config = TeamConfig()
-            session['team_config_data'] = {}
-            session['team_config'] = team_config.to_dict()
+            TeamConfig = team_config.TeamConfig()
+            session['TeamConfig_data'] = {}
+            session['TeamConfig'] = TeamConfig.to_dict()
             session['using_default_config'] = True
 
         log("="*60 + "\n")
@@ -1014,7 +1016,7 @@ def onshape_oauth_callback():
 
         # Otherwise redirect to main page with success message
         return redirect('/?onshape_connected=true')
-        
+
     except Exception as e:
         return f"OAuth callback error: {str(e)}", 500
 
@@ -1086,9 +1088,9 @@ def set_machine():
             return jsonify({'error': 'No machine_id provided'}), 400
 
         # Verify machine exists in config
-        team_config_data = session.get('team_config_data', {})
-        team_config = TeamConfig(team_config_data)
-        machines = team_config.get_available_machines()
+        TeamConfig_data = session.get('TeamConfig_data', {})
+        TeamConfig = team_config.TeamConfig(TeamConfig_data)
+        machines = TeamConfig.get_available_machines()
 
         if machine_id not in machines:
             return jsonify({'error': f'Unknown machine: {machine_id}'}), 400
@@ -1097,13 +1099,13 @@ def set_machine():
         session['machine_id'] = machine_id
 
         # Return updated config for this machine
-        team_config_dict = team_config.to_dict(machine_id)
+        TeamConfig_dict = TeamConfig.to_dict(machine_id)
 
         return jsonify({
             'success': True,
             'machine_id': machine_id,
             'machine_name': machines[machine_id].get('name', machine_id),
-            'config': team_config_dict
+            'config': TeamConfig_dict
         })
 
     except Exception as e:
@@ -1118,8 +1120,8 @@ def debug_session():
         'user_name': session.get('user_name'),
         'user_email': session.get('user_email'),
         'team_name': session.get('team_name'),
-        'team_config': session.get('team_config', {}),
-        'team_config_data_keys': list(session.get('team_config_data', {}).keys()),
+        'TeamConfig': session.get('TeamConfig', {}),
+        'TeamConfig_data_keys': list(session.get('TeamConfig_data', {}).keys()),
         'onshape_authenticated': session.get('onshape_authenticated'),
     })
 
@@ -1265,7 +1267,7 @@ def onshape_import():
             log(f"   ℹ️  No body_id - will search all parts")
 
         log(f"{'='*70}\n")
-        
+
         # WORKAROUND: If params have placeholder strings, we can't proceed
         if (document_id and ('${' in str(document_id) or document_id.startswith('$'))):
             log("❌ Onshape variable substitution failed!")
@@ -1306,7 +1308,7 @@ def onshape_import():
             return redirect('/onshape/auth')
 
         # User info and team config already loaded during OAuth callback
-        # Session contains: user_name, user_email, team_config, team_config_data
+        # Session contains: user_name, user_email, TeamConfig, TeamConfig_data
 
         # Get document's owning company/classroom (Onshape Education context)
         # This requires a document, so we fetch it here rather than during OAuth
@@ -1448,7 +1450,7 @@ def onshape_import():
                     'element_id': element_id
                 }
             }), 500
-        
+
         log(f"📄 DXF content received: {len(dxf_content)} bytes")
 
         # Generate filename: try to combine document name + part name
@@ -1494,10 +1496,10 @@ def onshape_import():
         # The frontend will detect the dxf_file parameter and auto-upload it
 
         # Get config values from session for template
-        team_config = session.get('team_config', {})
-        machine_x_max = team_config.get('machine_x_max', 48.0)
-        machine_y_max = team_config.get('machine_y_max', 96.0)
-        default_tool_diameter = team_config.get('default_tool_diameter', 0.157)
+        TeamConfig = session.get('TeamConfig', {})
+        machine_x_max = TeamConfig.get('machine_x_max', 48.0)
+        machine_y_max = TeamConfig.get('machine_y_max', 96.0)
+        default_tool_diameter = TeamConfig.get('default_tool_diameter', 0.157)
 
         return render_template('index.html',
                              dxf_file=dxf_token,  # Pass token instead of filename
@@ -1509,7 +1511,7 @@ def onshape_import():
                              machine_y_max=machine_y_max,
                              default_tool_diameter=default_tool_diameter,
                              using_default_config=session.get('using_default_config', False))
-        
+
     except Exception as e:
         return jsonify({
             'error': f'Import failed: {str(e)}'
@@ -1731,7 +1733,7 @@ if not IS_SERVERLESS:
 if __name__ == '__main__':
     # Get port from environment variable (Railway) or default to 6238 for local dev
     port = int(os.environ.get('PORT', 6238))
-    
+
     log("="*70)
     log("PenguinCAM - FRC Team 6238")
     log("="*70)
@@ -1741,7 +1743,7 @@ if __name__ == '__main__':
     log(f"📂 Server will run on port: {port}")
     log("\n⚠️  Press Ctrl+C to stop the server\n")
     log("="*70)
-    
+
     # Disable debug mode in production
     debug_mode = os.environ.get('FLASK_ENV') != 'production'
     app.run(debug=debug_mode, host='0.0.0.0', port=port)
