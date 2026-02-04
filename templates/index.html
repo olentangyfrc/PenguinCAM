@@ -54,6 +54,24 @@
             <div class="user-details">
                 <span class="user-icon">👤</span>
                 <span class="user-name">{{ session.get('user_name') }}</span>
+                <div class="dropdown-container">
+                    <button id="settingsBtn" class="icon-btn" title="Settings">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path>
+                            <circle cx="12" cy="12" r="3"></circle>
+                        </svg>
+                    </button>
+                    <div id="settingsDropdown" class="dropdown-menu" style="display: none;">
+                        <a href="#" id="downloadConfigBtn" class="dropdown-item">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                                <polyline points="7 10 12 15 17 10"></polyline>
+                                <line x1="12" y1="15" x2="12" y2="3"></line>
+                            </svg>
+                            Download configuration template
+                        </a>
+                    </div>
+                </div>
             </div>
             <a href="/auth/logout" class="logout-btn">Logout</a>
         </div>
@@ -98,17 +116,40 @@
                     </div>
 
                     <form id="paramForm">
+                        {% if machines|length > 1 %}
+                        <div class="param-group">
+                            <label>
+                                Machine
+                                <span class="label-hint">Select which machine to use</span>
+                            </label>
+                            <select id="machineId" required>
+                                {% for machine_id, machine_info in machines.items() %}
+                                <option value="{{ machine_id }}"
+                                        {% if machine_id == current_machine_id %}selected{% endif %}>
+                                    {{ machine_info.name }}
+                                </option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        {% endif %}
+
                         <div class="param-group">
                             <label>
                                 Material Type
                                 <span class="label-hint">Cutting parameters preset</span>
                             </label>
                             <select id="material" required>
-                                <option value="polycarb">Polycarb Plate</option>
-                                <option value="plywood">Plywood Plate</option>
-                                <option value="aluminum">Aluminum Plate</option>
-                                <option value="aluminum_tube">Aluminum Tube</option>
+                                {% for material_id, material_info in materials.items() %}
+                                <option value="{{ material_id }}"
+                                        {% if material_id == 'plywood' %}selected{% endif %}
+                                        {% if material_id in incomplete_materials %}data-incomplete="true"{% endif %}>
+                                    {{ material_info.name }}
+                                </option>
+                                {% endfor %}
                             </select>
+                            <div id="materialWarning" class="warning-message" style="display: none;">
+                                ⚠️ This material has incomplete settings in your config. Using plywood defaults for missing parameters.
+                            </div>
                         </div>
 
                         <div class="param-group">
@@ -256,8 +297,8 @@
                     <!-- Toolpath Scrubber -->
                     <div class="scrubber-container" id="scrubberContainer" style="display: none;">
                         <div class="scrubber-header">
-                            <span id="scrubberLabel">Move 1 of 1</span>
-                            <span id="scrubberOperation" class="scrubber-operation">Ready</span>
+                            <div id="scrubberLabel">Move 1 of 1</div>
+                            <div id="scrubberOperation" class="scrubber-operation">Ready</div>
                         </div>
                         <input type="range" id="toolpathScrubber" class="toolpath-scrubber" min="0" max="100" value="0" step="1">
                     </div>

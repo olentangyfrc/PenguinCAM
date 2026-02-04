@@ -113,7 +113,9 @@ const DEFAULT_SETTINGS = {
  * Save current form settings to localStorage
  */
 function saveSettings() {
+    const machineSelect = document.getElementById('machineId');
     const settings = {
+        machineId: machineSelect ? machineSelect.value : null,
         material: document.getElementById('material').value,
         thickness: document.getElementById('thickness').value,
         tabSpacing: document.getElementById('tabSpacing').value,
@@ -143,6 +145,10 @@ function loadSettings() {
         const serverDefaultToolDiameter = document.getElementById('toolDiameter').value;
 
         // Apply settings to form elements
+        const machineSelect = document.getElementById('machineId');
+        if (machineSelect && settings.machineId) {
+            machineSelect.value = settings.machineId;
+        }
         document.getElementById('material').value = settings.material || DEFAULT_SETTINGS.material;
         document.getElementById('thickness').value = settings.thickness || DEFAULT_SETTINGS.thickness;
         document.getElementById('tabSpacing').value = settings.tabSpacing || DEFAULT_SETTINGS.tabSpacing;
@@ -153,11 +159,13 @@ function loadSettings() {
         document.getElementById('toolDiameter').value = settings.toolDiameter || serverDefaultToolDiameter;
         appState.rotationAngle = settings.rotationAngle || DEFAULT_SETTINGS.rotationAngle;
 
-        // Trigger material change to show/hide tube params
+        // Trigger material change to show/hide tube params and warnings
         const materialSelect = document.getElementById('material');
         if (materialSelect.value === 'aluminum_tube') {
             document.getElementById('tubeParams').style.display = 'block';
         }
+        // Trigger change event to check for incomplete materials
+        materialSelect.dispatchEvent(new Event('change'));
 
         console.log('Settings loaded from localStorage');
     } catch (e) {
@@ -292,6 +300,14 @@ document.addEventListener('DOMContentLoaded', () => {
                 tubeParams.style.display = isAluminumTube ? 'block' : 'none';
             }
 
+            // Show/hide warning for incomplete materials
+            const materialWarning = document.getElementById('materialWarning');
+            const selectedOption = e.target.selectedOptions[0];
+            const isIncomplete = selectedOption?.getAttribute('data-incomplete') === 'true';
+            if (materialWarning) {
+                materialWarning.style.display = isIncomplete ? 'block' : 'none';
+            }
+
             // Update thickness label, default value, and hide tabs for aluminum tube
             const thicknessGroup = document.getElementById('thickness')?.closest('.param-group');
             const thicknessLabel = thicknessGroup?.querySelector('label');
@@ -319,6 +335,67 @@ document.addEventListener('DOMContentLoaded', () => {
             // Hide tabs for aluminum tube (not used)
             if (tabsGroup) tabsGroup.style.display = isAluminumTube ? 'none' : 'block';
         });
+
+        // Handle machine selection change
+        const machineSelect = document.getElementById('machineId');
+        if (machineSelect) {
+            machineSelect.addEventListener('change', async (e) => {
+                const machineId = e.target.value;
+                console.log('Machine changed to:', machineId);
+
+                try {
+                    // Update session with new machine
+                    const response = await fetch('/set-machine', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ machine_id: machineId })
+                    });
+
+                    if (response.ok) {
+                        const data = await response.json();
+                        console.log('Machine updated:', data.machine_name);
+
+                        // Reload page to get machine-specific materials and settings
+                        window.location.reload();
+                    } else {
+                        console.error('Failed to update machine');
+                    }
+                } catch (error) {
+                    console.error('Error updating machine:', error);
+                }
+            });
+        }
+
+        // Handle settings dropdown
+        const settingsBtn = document.getElementById('settingsBtn');
+        const settingsDropdown = document.getElementById('settingsDropdown');
+        const downloadConfigBtn = document.getElementById('downloadConfigBtn');
+
+        if (settingsBtn && settingsDropdown) {
+            // Toggle dropdown on settings button click
+            settingsBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const isVisible = settingsDropdown.style.display === 'block';
+                settingsDropdown.style.display = isVisible ? 'none' : 'block';
+            });
+
+            // Close dropdown when clicking outside
+            document.addEventListener('click', (e) => {
+                if (!settingsBtn.contains(e.target) && !settingsDropdown.contains(e.target)) {
+                    settingsDropdown.style.display = 'none';
+                }
+            });
+
+            // Handle download config template
+            if (downloadConfigBtn) {
+                downloadConfigBtn.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    console.log('Downloading config template...');
+                    window.location.href = '/download-config-template';
+                    settingsDropdown.style.display = 'none';
+                });
+            }
+        }
 
         // Check Google Drive availability
         let driveAvailable = false;
@@ -423,6 +500,12 @@ document.addEventListener('DOMContentLoaded', () => {
             const second = String(now.getSeconds()).padStart(2, '0');
             const timestamp = `${year}-${month}-${day} ${hour}:${minute}:${second}`;
             formData.append('timestamp', timestamp);
+
+            // Add machine ID if multiple machines available
+            const machineSelect = document.getElementById('machineId');
+            if (machineSelect) {
+                formData.append('machine_id', machineSelect.value);
+            }
 
             const material = document.getElementById('material').value;
             formData.append('material', material);
@@ -1500,6 +1583,173 @@ document.addEventListener('DOMContentLoaded', () => {
             renderer.render(scene, camera);
         }
 
+        /**
+         * Render DXF geometry entities as white lines on the stock top surface
+         * This shows the "cutting geometry" - the original design shapes
+         */
+        function renderDxfGeometry(scene, entities, zHeight) {
+            if (!dxfBounds) return;
+
+            const dxfMaterial = new THREE.LineBasicMaterial({
+                color: 0xFFFFFF, // White for visibility
+                linewidth: 2,
+                opacity: 0.8,
+                transparent: true
+            });
+
+            // Calculate rotated bounding box to determine offset
+            // We need to rotate all points, find their bounds, then offset so min is at (0,0)
+            const radians = rotationAngle * Math.PI / 180;
+            const cos = Math.cos(radians);
+            const sin = Math.sin(radians);
+
+            // Helper to rotate a point around DXF center
+            function rotatePoint(x, y) {
+                // Translate to origin
+                const tx = x - dxfBounds.centerX;
+                const ty = y - dxfBounds.centerY;
+                // Rotate
+                const rx = tx * cos - ty * sin;
+                const ry = tx * sin + ty * cos;
+                // Translate back
+                return { x: rx + dxfBounds.centerX, y: ry + dxfBounds.centerY };
+            }
+
+            // First pass: find bounding box of rotated geometry
+            let minX = Infinity, maxX = -Infinity;
+            let minY = Infinity, maxY = -Infinity;
+
+            entities.forEach(entity => {
+                function updateBounds(x, y) {
+                    const rotated = rotatePoint(x, y);
+                    minX = Math.min(minX, rotated.x);
+                    maxX = Math.max(maxX, rotated.x);
+                    minY = Math.min(minY, rotated.y);
+                    maxY = Math.max(maxY, rotated.y);
+                }
+
+                switch(entity.type) {
+                    case 'LINE':
+                        updateBounds(entity.vertices[0].x, entity.vertices[0].y);
+                        updateBounds(entity.vertices[1].x, entity.vertices[1].y);
+                        break;
+                    case 'CIRCLE':
+                        // Sample circle perimeter
+                        for (let i = 0; i < 8; i++) {
+                            const angle = (i / 8) * 2 * Math.PI;
+                            const x = entity.center.x + entity.radius * Math.cos(angle);
+                            const y = entity.center.y + entity.radius * Math.sin(angle);
+                            updateBounds(x, y);
+                        }
+                        break;
+                    case 'ARC':
+                        // Sample arc perimeter
+                        const startAngle = (entity.startAngle || 0) * Math.PI / 180;
+                        const endAngle = (entity.endAngle || 360) * Math.PI / 180;
+                        for (let i = 0; i <= 8; i++) {
+                            const t = i / 8;
+                            const angle = startAngle + (endAngle - startAngle) * t;
+                            const x = entity.center.x + entity.radius * Math.cos(angle);
+                            const y = entity.center.y + entity.radius * Math.sin(angle);
+                            updateBounds(x, y);
+                        }
+                        break;
+                    case 'LWPOLYLINE':
+                    case 'POLYLINE':
+                        entity.vertices.forEach(v => updateBounds(v.x, v.y));
+                        break;
+                    case 'SPLINE':
+                        if (entity.controlPoints) {
+                            entity.controlPoints.forEach(p => updateBounds(p.x, p.y));
+                        }
+                        break;
+                }
+            });
+
+            // Helper to transform a point: rotate around center, then translate so lower-left is at (0,0)
+            function transformPoint(x, y) {
+                // Rotate
+                const rotated = rotatePoint(x, y);
+                // Translate so lower-left (minX, minY) is at origin
+                const tx = rotated.x - minX;
+                const ty = rotated.y - minY;
+                // Map to Three.js coordinates: X -> X, Y -> -Z
+                return new THREE.Vector3(tx, zHeight, -ty);
+            }
+
+            entities.forEach(entity => {
+                let points = [];
+
+                switch(entity.type) {
+                    case 'LINE':
+                        // Straight line from start to end
+                        points = [
+                            transformPoint(entity.vertices[0].x, entity.vertices[0].y),
+                            transformPoint(entity.vertices[1].x, entity.vertices[1].y)
+                        ];
+                        break;
+
+                    case 'CIRCLE':
+                        // Full circle - tessellate into line segments
+                        {
+                            const numPoints = 50;
+                            for (let i = 0; i <= numPoints; i++) {
+                                const angle = (i / numPoints) * 2 * Math.PI;
+                                const x = entity.center.x + entity.radius * Math.cos(angle);
+                                const y = entity.center.y + entity.radius * Math.sin(angle);
+                                points.push(transformPoint(x, y));
+                            }
+                        }
+                        break;
+
+                    case 'ARC':
+                        // Partial arc - tessellate into line segments
+                        {
+                            const startAngle = (entity.startAngle || 0) * Math.PI / 180;
+                            const endAngle = (entity.endAngle || 360) * Math.PI / 180;
+                            const numPoints = 50;
+
+                            for (let i = 0; i <= numPoints; i++) {
+                                const t = i / numPoints;
+                                const angle = startAngle + (endAngle - startAngle) * t;
+                                const x = entity.center.x + entity.radius * Math.cos(angle);
+                                const y = entity.center.y + entity.radius * Math.sin(angle);
+                                points.push(transformPoint(x, y));
+                            }
+                        }
+                        break;
+
+                    case 'LWPOLYLINE':
+                    case 'POLYLINE':
+                        // Connected line segments through vertices
+                        points = entity.vertices.map(v => transformPoint(v.x, v.y));
+                        // Close the polyline if it's marked as closed
+                        if (entity.closed && points.length > 0) {
+                            points.push(points[0].clone());
+                        }
+                        break;
+
+                    case 'SPLINE':
+                        // Approximate spline with control points
+                        if (entity.controlPoints && entity.controlPoints.length > 1) {
+                            points = entity.controlPoints.map(p => transformPoint(p.x, p.y));
+                        }
+                        break;
+
+                    default:
+                        // Skip unsupported entity types
+                        return;
+                }
+
+                // Create and add the line to the scene
+                if (points.length >= 2) {
+                    const geometry = new THREE.BufferGeometry().setFromPoints(points);
+                    const line = new THREE.Line(geometry, dxfMaterial);
+                    scene.add(line);
+                }
+            });
+        }
+
         function visualizeGcode(gcode) {
             // Parse G-code into moves
             const lines = gcode.split('\n');
@@ -1776,6 +2026,11 @@ document.addEventListener('DOMContentLoaded', () => {
             );
             stockMesh.renderOrder = -1; // Render stock before toolpaths
             scene.add(stockMesh);
+
+            // Render DXF geometry overlay (white lines on stock top surface)
+            if (dxfGeometry && dxfGeometry.entities) {
+                renderDxfGeometry(scene, dxfGeometry.entities, materialThickness);
+            }
 
             // Create tool representation (endmill)
             const toolLength = Math.max(maxZ * 1.5, 1.0);

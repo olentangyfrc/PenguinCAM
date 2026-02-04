@@ -101,6 +101,62 @@
             font-family: 'Monaco', 'Courier New', monospace;
         }
 
+        .dropdown-container {
+            position: relative;
+        }
+
+        .icon-btn {
+            background: transparent;
+            border: none;
+            color: var(--text-dim);
+            padding: 0.5rem;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .icon-btn:hover {
+            background: var(--surface);
+            color: var(--primary);
+        }
+
+        .dropdown-menu {
+            position: absolute;
+            top: calc(100% + 0.5rem);
+            right: 0;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+            min-width: 220px;
+            z-index: 1000;
+            overflow: hidden;
+        }
+
+        .dropdown-item {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            padding: 0.75rem 1rem;
+            color: var(--text);
+            text-decoration: none;
+            transition: all 0.2s ease;
+            font-size: 0.875rem;
+            white-space: nowrap;
+        }
+
+        .dropdown-item:hover {
+            background: var(--bg);
+            color: var(--primary);
+        }
+
+        .dropdown-item svg {
+            flex-shrink: 0;
+        }
+
         .logout-btn {
             background: var(--bg);
             border: 1px solid var(--border);
@@ -515,6 +571,18 @@
             margin-bottom: 0.5rem;
         }
 
+        /* Warning message (inline) */
+        .warning-message {
+            margin-top: 0.5rem;
+            padding: 0.75rem;
+            background: rgba(251, 181, 21, 0.1);
+            border: 1px solid rgba(251, 181, 21, 0.3);
+            border-radius: 4px;
+            color: #FBB515;
+            font-size: 0.85rem;
+            line-height: 1.4;
+        }
+
         /* Controls */
         .controls {
             margin-top: 1rem;
@@ -551,8 +619,8 @@
 
         .scrubber-header {
             display: flex;
-            justify-content: space-between;
-            align-items: center;
+            flex-direction: column;
+            gap: 0.5rem;
             margin-bottom: 0.75rem;
             font-size: 0.9rem;
         }
@@ -566,6 +634,8 @@
             color: var(--text-dim);
             font-size: 0.85rem;
             font-family: 'Courier New', monospace;
+            height: 2.5rem;
+            overflow: hidden;
         }
 
         .toolpath-scrubber {

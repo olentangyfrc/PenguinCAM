@@ -150,13 +150,21 @@ class FRCPostProcessor:
         # Error tracking
         self.errors = []  # Collect validation errors during processing
 
-    def apply_material_preset(self, material: str):
+    def apply_material_preset(self, material: str, machine_id: Optional[str] = None):
         """
         Apply a material preset to set feeds, speeds, and ramp angles.
 
         Args:
-            material: Material name ('plywood', 'aluminum', 'polycarbonate')
+            material: Material name ('plywood', 'aluminum', 'polycarbonate', or custom)
+            machine_id: Optional machine ID for machine-specific settings
         """
+        # Get material preset from config (merges user config with Team 6238 defaults)
+        preset = self.config.get_material_preset(material, machine_id)
+
+        # Check if we got a valid preset (config returns empty dict for unknown materials)
+        if not preset:
+            print(f"Warning: Unknown material '{material}'. Using default plywood settings.")
+            preset = self.config.get_material_preset('plywood', machine_id)
         if material not in MATERIAL_PRESETS:
             print(f"Warning: Unknown material '{material}'. Available: {', '.join(MATERIAL_PRESETS.keys())}")
             print("Using default plywood settings.")
@@ -3174,8 +3182,7 @@ def main():
     parser.add_argument('--cut-to-length', action='store_true',
                        help='Machine tube to length after pattern (tube-pattern mode)')
     parser.add_argument('--material', type=str, default='plywood',
-                       choices=['plywood', 'aluminum', 'polycarbonate'],
-                       help='Material preset (default: plywood) - sets feeds, speeds, and ramp angles')
+                       help='Material preset (default: plywood). Built-in: plywood, aluminum, polycarbonate. Custom materials from config also supported.')
     parser.add_argument('--thickness', type=float, default=0.25,
                        help='Material thickness in inches (default: 0.25)')
     parser.add_argument('--tool-diameter', type=float, default=0.157,
