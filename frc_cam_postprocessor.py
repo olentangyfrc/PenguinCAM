@@ -18,6 +18,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import List, Tuple, Optional, Dict, Any
 from zoneinfo import ZoneInfo
+import sys
 
 # Third-party
 import ezdxf
@@ -98,7 +99,7 @@ MATERIAL_PRESETS = {
 
 
 class FRCPostProcessor:
-    def __init__(self, material_thickness: float, tool_diameter: float, units: str = "inch"):
+    def __init__(self, material_thickness: float, tool_diameter: float, units: str = "inch", config=None):
         """
         Initialize the post-processor
 
@@ -112,7 +113,7 @@ class FRCPostProcessor:
         self.tool_radius = tool_diameter / 2
         self.units = units
         self.tolerance = 0.02  # Tolerance for hole detection (inches)
-
+        self.config = config
         # Minimum hole diameter that can be milled (must be > tool diameter for chip evacuation)
         # Holes smaller than this are skipped
         self.min_millable_hole = tool_diameter * 1.2  # 20% larger than tool for chip clearance
