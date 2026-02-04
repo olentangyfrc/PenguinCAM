@@ -891,7 +891,7 @@ class FRCPostProcessor:
         # Sort pockets to minimize travel time
         self._sort_pockets()
 
-    def generate_gcode(self, suggested_filename: str = None) -> PostProcessorResult:
+    def generate_gcode(self, suggested_filename: str = None, timestamp=None) -> PostProcessorResult:
         """
         Generate complete G-code for standard plate operations
 
