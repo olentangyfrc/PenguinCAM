@@ -42,6 +42,16 @@
             color: var(--text-dim);
             padding: 24px 0;
         }
+        .face-info {
+            display: none;
+            margin-bottom: 16px;
+            padding: 12px;
+            background: #003087;
+            border-left: 4px solid var(--primary);
+            border-radius: 4px;
+            font-size: 13px;
+            color: var(--text);
+        }
         .button-group {
             display: flex;
             flex-direction: column;
@@ -107,6 +117,10 @@
             Select a face to export
         </div>
 
+        <div id="faceInfo" class="face-info">
+            <strong>Selected:</strong> <span id="faceId">-</span>
+        </div>
+
         <div id="buttonGroup" class="button-group" style="display: none;">
             <button id="sendToPenguinCAM" class="btn-primary" disabled>
                 Send to 4611PenguinCAM
@@ -114,7 +128,6 @@
             <button id="saveToDrive" class="btn-secondary" disabled>
                 Save DXF to Drive (Not currently enabled)
             </button>
-            <!-- Drive button removed - doesn't work in embedded iframe context -->
         </div>
     </div>
 
