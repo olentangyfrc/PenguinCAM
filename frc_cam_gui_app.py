@@ -452,7 +452,7 @@ def index():
                          using_default_config=session.get('using_default_config', False),
                          machines=machines,
                          current_machine_id=current_machine_id,
-                         #materials=available_materials,
+                         materials=available_materials,
                          incomplete_materials=incomplete_materials)
 
 @app.route('/process', methods=['POST'])
