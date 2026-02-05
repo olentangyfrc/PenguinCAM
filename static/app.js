@@ -208,7 +208,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const dropZone = document.getElementById('dropZone');
         const fileInput = document.getElementById('fileInput');
         const fileInfo = document.getElementById('fileInfo');
-        const fileName = document.getElementById('fileName');
+        if (fileInfo) fileInfo.style.display = 'flex';        const fileName = document.getElementById('fileName');
         const fileSize = document.getElementById('fileSize');
         const generateBtn = document.getElementById('generateBtn');
         const downloadBtn = document.getElementById('downloadBtn');
