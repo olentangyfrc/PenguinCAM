@@ -207,8 +207,7 @@ document.addEventListener('DOMContentLoaded', () => {
         // DOM elements
         const dropZone = document.getElementById('dropZone');
         const fileInput = document.getElementById('fileInput');
-        const fileInfo = document.getElementById('fileInfo');
-        if (fileInfo) fileInfo.style.display = 'flex';        const fileName = document.getElementById('fileName');
+        const fileInfo = document.getElementById('fileLoadedCard');
         const fileSize = document.getElementById('fileSize');
         const generateBtn = document.getElementById('generateBtn');
         const downloadBtn = document.getElementById('downloadBtn');
