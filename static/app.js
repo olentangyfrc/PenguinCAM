@@ -30,68 +30,6 @@ const appState = {
 };
 
 // ============================================================================
-// DXF Geometry Utilities
-// ============================================================================
-
-/**
- * Check if an angle is within an arc's angular range
- * Handles arcs that cross the 0° boundary
- */
-function angleInArcRange(angle, startAngle, endAngle) {
-    // Normalize angles to 0-360
-    angle = ((angle % 360) + 360) % 360;
-    startAngle = ((startAngle % 360) + 360) % 360;
-    endAngle = ((endAngle % 360) + 360) % 360;
-
-    if (startAngle <= endAngle) {
-        return angle >= startAngle && angle <= endAngle;
-    } else {
-        // Arc crosses 0°
-        return angle >= startAngle || angle <= endAngle;
-    }
-}
-
-/**
- * Calculate tight bounding box for an arc (not full circle)
- * Returns {minX, maxX, minY, maxY}
- */
-function calculateArcBounds(centerX, centerY, radius, startAngle, endAngle) {
-    // Start with arc endpoints
-    const startRad = startAngle * Math.PI / 180;
-    const endRad = endAngle * Math.PI / 180;
-
-    const points = [
-        { x: centerX + radius * Math.cos(startRad), y: centerY + radius * Math.sin(startRad) },
-        { x: centerX + radius * Math.cos(endRad), y: centerY + radius * Math.sin(endRad) }
-    ];
-
-    // Check if arc crosses any cardinal directions (extrema)
-    if (angleInArcRange(0, startAngle, endAngle)) {
-        points.push({ x: centerX + radius, y: centerY });  // Right (0°)
-    }
-    if (angleInArcRange(90, startAngle, endAngle)) {
-        points.push({ x: centerX, y: centerY + radius });  // Top (90°)
-    }
-    if (angleInArcRange(180, startAngle, endAngle)) {
-        points.push({ x: centerX - radius, y: centerY });  // Left (180°)
-    }
-    if (angleInArcRange(270, startAngle, endAngle)) {
-        points.push({ x: centerX, y: centerY - radius });  // Bottom (270°)
-    }
-
-    // Calculate bounds from all critical points
-    const xs = points.map(p => p.x);
-    const ys = points.map(p => p.y);
-
-    return {
-        minX: Math.min(...xs),
-        maxX: Math.max(...xs),
-        minY: Math.min(...ys),
-        maxY: Math.max(...ys)
-    };
-}
-
-// ============================================================================
 // Settings Persistence (localStorage)
 // ============================================================================
 
@@ -113,9 +51,7 @@ const DEFAULT_SETTINGS = {
  * Save current form settings to localStorage
  */
 function saveSettings() {
-    const machineSelect = document.getElementById('machineId');
     const settings = {
-        machineId: machineSelect ? machineSelect.value : null,
         material: document.getElementById('material').value,
         thickness: document.getElementById('thickness').value,
         tabSpacing: document.getElementById('tabSpacing').value,
@@ -141,31 +77,21 @@ function loadSettings() {
         const saved = localStorage.getItem('penguinCAM_settings');
         const settings = saved ? JSON.parse(saved) : DEFAULT_SETTINGS;
 
-        // Get server-provided default tool diameter from HTML (set by team config)
-        const serverDefaultToolDiameter = document.getElementById('toolDiameter').value;
-
         // Apply settings to form elements
-        const machineSelect = document.getElementById('machineId');
-        if (machineSelect && settings.machineId) {
-            machineSelect.value = settings.machineId;
-        }
         document.getElementById('material').value = settings.material || DEFAULT_SETTINGS.material;
         document.getElementById('thickness').value = settings.thickness || DEFAULT_SETTINGS.thickness;
         document.getElementById('tabSpacing').value = settings.tabSpacing || DEFAULT_SETTINGS.tabSpacing;
         document.getElementById('tubeHeight').value = settings.tubeHeight || DEFAULT_SETTINGS.tubeHeight;
         document.getElementById('squareEnd').checked = settings.squareEnd !== undefined ? settings.squareEnd : DEFAULT_SETTINGS.squareEnd;
         document.getElementById('cutToLength').checked = settings.cutToLength !== undefined ? settings.cutToLength : DEFAULT_SETTINGS.cutToLength;
-        // Use saved value if exists, otherwise keep server-provided default
-        document.getElementById('toolDiameter').value = settings.toolDiameter || serverDefaultToolDiameter;
+        document.getElementById('toolDiameter').value = settings.toolDiameter || DEFAULT_SETTINGS.toolDiameter;
         appState.rotationAngle = settings.rotationAngle || DEFAULT_SETTINGS.rotationAngle;
 
-        // Trigger material change to show/hide tube params and warnings
+        // Trigger material change to show/hide tube params
         const materialSelect = document.getElementById('material');
         if (materialSelect.value === 'aluminum_tube') {
             document.getElementById('tubeParams').style.display = 'block';
         }
-        // Trigger change event to check for incomplete materials
-        materialSelect.dispatchEvent(new Event('change'));
 
         console.log('Settings loaded from localStorage');
     } catch (e) {
@@ -269,7 +195,11 @@ document.addEventListener('DOMContentLoaded', () => {
     // Load saved settings from localStorage
         loadSettings();
 
-    // Global state (using appState object for cross-scope access)
+    // Global state
+        let uploadedFile = null;
+        let suggestedFilename = null; // For Onshape imports
+        let gcodeContent = null;
+        let outputFilename = null;
         let scene, camera, renderer, controls;
         let optimalCameraPosition = { x: 10, y: 10, z: 10 };
         let optimalLookAtPosition = { x: 0, y: 0, z: 0 };
@@ -277,11 +207,9 @@ document.addEventListener('DOMContentLoaded', () => {
         // DOM elements
         const dropZone = document.getElementById('dropZone');
         const fileInput = document.getElementById('fileInput');
-        const fileLoadedCard = document.getElementById('fileLoadedCard');
         const fileInfo = document.getElementById('fileInfo');
         const fileName = document.getElementById('fileName');
         const fileSize = document.getElementById('fileSize');
-        const uploadDifferentLink = document.getElementById('uploadDifferentLink');
         const generateBtn = document.getElementById('generateBtn');
         const downloadBtn = document.getElementById('downloadBtn');
         const driveBtn = document.getElementById('driveBtn');
@@ -300,14 +228,6 @@ document.addEventListener('DOMContentLoaded', () => {
             const isAluminumTube = e.target.value === 'aluminum_tube';
             if (tubeParams) {
                 tubeParams.style.display = isAluminumTube ? 'block' : 'none';
-            }
-
-            // Show/hide warning for incomplete materials
-            const materialWarning = document.getElementById('materialWarning');
-            const selectedOption = e.target.selectedOptions[0];
-            const isIncomplete = selectedOption?.getAttribute('data-incomplete') === 'true';
-            if (materialWarning) {
-                materialWarning.style.display = isIncomplete ? 'block' : 'none';
             }
 
             // Update thickness label, default value, and hide tabs for aluminum tube
@@ -338,67 +258,6 @@ document.addEventListener('DOMContentLoaded', () => {
             if (tabsGroup) tabsGroup.style.display = isAluminumTube ? 'none' : 'block';
         });
 
-        // Handle machine selection change
-        const machineSelect = document.getElementById('machineId');
-        if (machineSelect) {
-            machineSelect.addEventListener('change', async (e) => {
-                const machineId = e.target.value;
-                console.log('Machine changed to:', machineId);
-
-                try {
-                    // Update session with new machine
-                    const response = await fetch('/set-machine', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ machine_id: machineId })
-                    });
-
-                    if (response.ok) {
-                        const data = await response.json();
-                        console.log('Machine updated:', data.machine_name);
-
-                        // Reload page to get machine-specific materials and settings
-                        window.location.reload();
-                    } else {
-                        console.error('Failed to update machine');
-                    }
-                } catch (error) {
-                    console.error('Error updating machine:', error);
-                }
-            });
-        }
-
-        // Handle settings dropdown
-        const settingsBtn = document.getElementById('settingsBtn');
-        const settingsDropdown = document.getElementById('settingsDropdown');
-        const downloadConfigBtn = document.getElementById('downloadConfigBtn');
-
-        if (settingsBtn && settingsDropdown) {
-            // Toggle dropdown on settings button click
-            settingsBtn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                const isVisible = settingsDropdown.style.display === 'block';
-                settingsDropdown.style.display = isVisible ? 'none' : 'block';
-            });
-
-            // Close dropdown when clicking outside
-            document.addEventListener('click', (e) => {
-                if (!settingsBtn.contains(e.target) && !settingsDropdown.contains(e.target)) {
-                    settingsDropdown.style.display = 'none';
-                }
-            });
-
-            // Handle download config template
-            if (downloadConfigBtn) {
-                downloadConfigBtn.addEventListener('click', (e) => {
-                    e.preventDefault();
-                    console.log('Downloading config template...');
-                    window.location.href = '/download-config-template';
-                    settingsDropdown.style.display = 'none';
-                });
-            }
-        }
-
         // Check Google Drive availability
         let driveAvailable = false;
         async function checkDriveStatus() {
@@ -406,11 +265,14 @@ document.addEventListener('DOMContentLoaded', () => {
                 const response = await fetch('/drive/status');
                 const data = await response.json();
 
-                if (data.available && data.enabled) {
+                if (data.available && data.configured) {
                     driveAvailable = true;
                     driveBtn.style.display = 'inline-block';
+                } else if (data.available && !data.configured) {
+                    driveStatus.textContent = '⚠️ Google Drive not configured - see GOOGLE_DRIVE_SETUP.md';
+                    driveStatus.style.display = 'block';
+                    driveStatus.style.color = '#FFA500';
                 }
-                // Don't show Drive warnings during DXF setup - only relevant after G-code generation
             } catch (error) {
                 // Drive integration not available - that's okay
                 console.log('Google Drive integration not available');
@@ -454,15 +316,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 return;
             }
 
-            // Store in appState for access across scopes
-            appState.uploadedFile = file;
+            uploadedFile = file;
             fileName.textContent = file.name;
             fileSize.textContent = formatFileSize(file.size);
-
-            // Show file loaded card, hide drop zone
-            dropZone.style.display = 'none';
-            fileLoadedCard.style.display = 'block';
-
+            fileInfo.style.display = 'flex';
             generateBtn.disabled = false;
             generateBtn.textContent = '🚀 Generate Program';
             hideError();
@@ -476,14 +333,6 @@ document.addEventListener('DOMContentLoaded', () => {
             reader.readAsText(file);
         }
 
-        // Handle "Upload a different file" link
-        if (uploadDifferentLink) {
-            uploadDifferentLink.addEventListener('click', (e) => {
-                e.preventDefault();
-                fileInput.click();
-            });
-        }
-
         function formatFileSize(bytes) {
             if (bytes < 1024) return bytes + ' bytes';
             if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
@@ -492,35 +341,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Generate G-code
         generateBtn.addEventListener('click', async () => {
-            console.log('🔍 Generate button clicked');
-            console.log('📂 appState.uploadedFile:', appState.uploadedFile);
-
-            if (!appState.uploadedFile) {
-                console.error('❌ No file in appState.uploadedFile');
-                return;
-            }
+            if (!uploadedFile) return;
 
             const formData = new FormData();
-            formData.append('file', appState.uploadedFile);
-            console.log('✅ FormData created with file:', appState.uploadedFile.name);
-
-            // Generate timestamp in user's local timezone
-            const now = new Date();
-            const year = now.getFullYear();
-            const month = String(now.getMonth() + 1).padStart(2, '0');
-            const day = String(now.getDate()).padStart(2, '0');
-            const hour = String(now.getHours()).padStart(2, '0');
-            const minute = String(now.getMinutes()).padStart(2, '0');
-            const second = String(now.getSeconds()).padStart(2, '0');
-            const timestamp = `${year}-${month}-${day} ${hour}:${minute}:${second}`;
-            formData.append('timestamp', timestamp);
-
-            // Add machine ID if multiple machines available
-            const machineSelect = document.getElementById('machineId');
-            if (machineSelect) {
-                formData.append('machine_id', machineSelect.value);
-            }
-
+            formData.append('file', uploadedFile);
             const material = document.getElementById('material').value;
             formData.append('material', material);
             formData.append('tool_diameter', document.getElementById('toolDiameter').value);
@@ -539,8 +363,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 formData.append('tab_spacing', document.getElementById('tabSpacing').value);
             }
             formData.append('rotation', rotationAngle); // Add rotation angle
-            if (appState.suggestedFilename) {
-                formData.append('suggested_filename', appState.suggestedFilename); // Onshape filename
+            if (suggestedFilename) {
+                formData.append('suggested_filename', suggestedFilename); // Onshape filename
             }
 
             showLoading();
@@ -562,8 +386,8 @@ document.addEventListener('DOMContentLoaded', () => {
                     throw new Error(errorMsg + details);
                 }
 
-                appState.gcodeContent = data.gcode;
-                appState.outputFilename = data.filename;
+                gcodeContent = data.gcode;
+                outputFilename = data.filename;
 
                 // Show results
                 showResults(data);
@@ -572,15 +396,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 switchMode('preview');
                 visualizeGcode(data.gcode);
 
-                // Enable download button
+                // Enable download and drive buttons
                 downloadBtn.disabled = false;
-
-                // Re-check Drive status (config may have been loaded during Onshape import)
-                checkDriveStatus().then(() => {
-                    if (driveAvailable) {
-                        driveBtn.disabled = false;
-                    }
-                });
+                if (driveAvailable) {
+                    driveBtn.disabled = false;
+                }
 
             } catch (error) {
                 if (Object.hasOwn(error, "details")) {
@@ -594,67 +414,20 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Download G-code
         downloadBtn.addEventListener('click', () => {
-            if (!appState.outputFilename) return;
-            window.location.href = `/download/${appState.outputFilename}`;
+            if (!outputFilename) return;
+            window.location.href = `/download/${outputFilename}`;
         });
 
         // Upload to Google Drive
         driveBtn.addEventListener('click', async () => {
-            if (!appState.outputFilename) return;
+            if (!outputFilename) return;
 
             driveBtn.disabled = true;
-            driveBtn.textContent = '⏳ Checking auth...';
+            driveBtn.textContent = '⏳ Uploading...';
             driveStatus.style.display = 'none';
 
             try {
-                // First, check if we're authenticated
-                const statusResponse = await fetch('/drive/status');
-                const statusData = await statusResponse.json();
-
-                if (!statusData.authenticated) {
-                    // Not authenticated - open OAuth in popup
-                    driveBtn.textContent = '🔐 Authenticating...';
-                    driveStatus.textContent = 'Opening Google sign-in...';
-                    driveStatus.style.color = '#FDB515';
-                    driveStatus.style.display = 'block';
-
-                    // Open OAuth in popup window
-                    const popup = window.open(
-                        '/auth/login',
-                        'GoogleAuth',
-                        'width=600,height=700,left=100,top=100'
-                    );
-
-                    if (!popup || popup.closed) {
-                        // Popup blocked - show instructions instead of auto-redirecting
-                        driveBtn.textContent = '💾 Save to Google Drive';
-                        driveBtn.disabled = false;
-                        driveStatus.innerHTML = '⚠️ Popup blocked! Please allow popups for this site and try again.<br>' +
-                                               'Or <a href="/auth/login" target="_blank" style="color: #FDB515; text-decoration: underline;">click here</a> to authenticate in a new tab.';
-                        driveStatus.style.color = 'var(--warning)';
-                        driveStatus.style.display = 'block';
-                        return;
-                    }
-
-                    // Wait for popup to close (OAuth complete)
-                    const pollTimer = setInterval(() => {
-                        if (popup.closed) {
-                            clearInterval(pollTimer);
-                            // Popup closed, retry the upload
-                            console.log('Auth popup closed, retrying upload...');
-                            setTimeout(() => {
-                                driveBtn.click(); // Retry the upload
-                            }, 500);
-                        }
-                    }, 500);
-
-                    return;
-                }
-
-                // We're authenticated, proceed with upload
-                driveBtn.textContent = '⏳ Uploading...';
-
-                const response = await fetch(`/drive/upload/${appState.outputFilename}`, {
+                const response = await fetch(`/drive/upload/${outputFilename}`, {
                     method: 'POST'
                 });
 
@@ -778,7 +551,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 previewControls.style.display = 'none';
                 gcodeButtons.style.display = 'none';
                 if (stockSizeDisplay) stockSizeDisplay.style.display = 'none';
-                
+
                 // Resize canvas now that it's visible
                 if (dxfCanvas2D && dxfGeometry) {
                     setTimeout(() => {
@@ -809,7 +582,7 @@ document.addEventListener('DOMContentLoaded', () => {
         function initDxfSetup() {
             dxfCanvas2D = document.getElementById('dxfSetupCanvas');
             dxfCtx2D = dxfCanvas2D.getContext('2d');
-            
+
             // CRITICAL: Set canvas internal size to match CSS display size
             // to avoid stretching/distortion
             const rect = dxfCanvas2D.getBoundingClientRect();
@@ -822,16 +595,29 @@ document.addEventListener('DOMContentLoaded', () => {
                 dxfCanvas2D.width = 800;
                 dxfCanvas2D.height = 500;
             }
-            
+
             // Setup event listeners
-            document.getElementById('rotateBtn').addEventListener('click', () => {
-                rotationAngle = (rotationAngle + 90) % 360;
-                appState.rotationAngle = rotationAngle; // Keep appState in sync
+           //document.getElementById('rotateBtn').addEventListener('click', () => {
+             //   rotationAngle = (rotationAngle + 90) % 360;
+               // appState.rotationAngle = rotationAngle; // Keep appState in sync
+                //document.getElementById('rotationDisplay').textContent = rotationAngle + '°';
+                //renderDxfSetup();
+                //saveSettings(); // Persist rotation angle
+            //});
+
+            document.getElementById('rotateBtn').addEventListener('click', (event) => {
+                const step = event.shiftKey ? 5 : 45;          // Shift = fine adjust
+                rotationAngle = (rotationAngle + step) % 360;  // wrap 0–359
+
+                appState.rotationAngle = rotationAngle;
                 document.getElementById('rotationDisplay').textContent = rotationAngle + '°';
                 renderDxfSetup();
-                saveSettings(); // Persist rotation angle
+                saveSettings();
             });
-            
+
+
+
+
             // Mode toggle listeners
             document.querySelectorAll('.mode-button').forEach(btn => {
                 btn.addEventListener('click', () => switchMode(btn.dataset.mode));
@@ -848,17 +634,17 @@ document.addEventListener('DOMContentLoaded', () => {
                     parseDxfManually(dxfContent);
                     return;
                 }
-                
+
                 // Use dxf-parser library to parse DXF
                 const parser = new window.DxfParser();
                 const dxf = parser.parseSync(dxfContent);
-                
+
                 console.log('Parsed DXF:', dxf);
-                
+
                 // Extract bounds from all entities
                 let minX = Infinity, maxX = -Infinity;
                 let minY = Infinity, maxY = -Infinity;
-                
+
                 // Helper to update bounds
                 function updateBounds(x, y) {
                     minX = Math.min(minX, x);
@@ -866,7 +652,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     minY = Math.min(minY, y);
                     maxY = Math.max(maxY, y);
                 }
-                
+
                 // Process entities to get bounds
                 if (dxf.entities) {
                     dxf.entities.forEach(entity => {
@@ -876,18 +662,8 @@ document.addEventListener('DOMContentLoaded', () => {
                                 updateBounds(entity.center.x + entity.radius, entity.center.y + entity.radius);
                                 break;
                             case 'ARC':
-                                // Calculate proper arc bounds (not full circle)
-                                {
-                                    const bounds = calculateArcBounds(
-                                        entity.center.x,
-                                        entity.center.y,
-                                        entity.radius,
-                                        entity.startAngle || 0,
-                                        entity.endAngle || 360
-                                    );
-                                    updateBounds(bounds.minX, bounds.minY);
-                                    updateBounds(bounds.maxX, bounds.maxY);
-                                }
+                                updateBounds(entity.center.x - entity.radius, entity.center.y - entity.radius);
+                                updateBounds(entity.center.x + entity.radius, entity.center.y + entity.radius);
                                 break;
                             case 'LINE':
                                 updateBounds(entity.vertices[0].x, entity.vertices[0].y);
@@ -912,17 +688,17 @@ document.addEventListener('DOMContentLoaded', () => {
                         }
                     });
                 }
-                
+
                 if (minX === Infinity) {
                     minX = 0; maxX = 10;
                     minY = 0; maxY = 10;
                 }
-                
+
                 console.log(`DXF bounds: X=[${minX.toFixed(3)}, ${maxX.toFixed(3)}], Y=[${minY.toFixed(3)}, ${maxY.toFixed(3)}]`);
                 console.log(`Entity count: ${dxf.entities ? dxf.entities.length : 0}`);
-                
+
                 // Store parsed DXF data
-                dxfGeometry = { 
+                dxfGeometry = {
                     minX, maxX, minY, maxY,
                     entities: dxf.entities || []
                 };
@@ -933,17 +709,10 @@ document.addEventListener('DOMContentLoaded', () => {
                     centerY: (minY + maxY) / 2
                 };
 
-                // Debug: Log bounds calculation
-                console.log('DXF Bounds Debug:');
-                console.log(`  minX: ${minX.toFixed(4)}, maxX: ${maxX.toFixed(4)}`);
-                console.log(`  minY: ${minY.toFixed(4)}, maxY: ${maxY.toFixed(4)}`);
-                console.log(`  Width: ${dxfBounds.width.toFixed(4)}", Height: ${dxfBounds.height.toFixed(4)}"`);
-                console.log(`  Total entities processed: ${dxf.entities ? dxf.entities.length : 0}`);
-
                 // Show mode toggle and switch to setup mode
                 document.getElementById('modeToggle').style.display = 'flex';
                 switchMode('setup');
-                
+
             } catch (error) {
                 console.error('DXF parsing error:', error);
                 // Try manual fallback
@@ -951,10 +720,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 parseDxfManually(dxfContent);
             }
         }
-        
+
         // Fallback manual DXF parser (simple but works for basic shapes)
         function parseDxfManually(dxfContent) {
             const lines = dxfContent.split('\n');
+            let minX = Infinity, maxX = -Infinity;
+            let minY = Infinity, maxY = -Infinity;
 
             const entities = [];
             let inEntitiesSection = false;
@@ -986,7 +757,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     }
                 }
 
-                // Parse coordinates (store in entity data, don't update bounds yet)
+                // Parse coordinates
                 if (line === '10' && i + 1 < lines.length) {
                     const val = parseFloat(lines[i + 1]);
                     if (!isNaN(val) && Math.abs(val) < 1e10) {
@@ -999,6 +770,8 @@ document.addEventListener('DOMContentLoaded', () => {
                         } else if (currentEntity === 'SPLINE') {
                             entityData.tempX = val;
                         }
+                        minX = Math.min(minX, val);
+                        maxX = Math.max(maxX, val);
                     }
                 } else if (line === '20' && i + 1 < lines.length) {
                     const val = parseFloat(lines[i + 1]);
@@ -1014,11 +787,19 @@ document.addEventListener('DOMContentLoaded', () => {
                             entityData.controlPoints.push({ x: entityData.tempX, y: val });
                             delete entityData.tempX;
                         }
+                        minY = Math.min(minY, val);
+                        maxY = Math.max(maxY, val);
                     }
                 } else if (line === '40' && i + 1 < lines.length) {
                     const val = parseFloat(lines[i + 1]);
                     if (!isNaN(val) && val < 1e10) {
                         entityData.radius = val;
+                        if (entityData.centerX !== undefined) {
+                            minX = Math.min(minX, entityData.centerX - val);
+                            maxX = Math.max(maxX, entityData.centerX + val);
+                            minY = Math.min(minY, entityData.centerY - val);
+                            maxY = Math.max(maxY, entityData.centerY + val);
+                        }
                     }
                 } else if (line.trim() === '50' && i + 1 < lines.length && currentEntity === 'ARC') {
                     entityData.startAngle = parseFloat(lines[i + 1].trim());
@@ -1028,11 +809,15 @@ document.addEventListener('DOMContentLoaded', () => {
                     const val = parseFloat(lines[i + 1]);
                     if (!isNaN(val) && Math.abs(val) < 1e10) {
                         entityData.x2 = val;
+                        minX = Math.min(minX, val);
+                        maxX = Math.max(maxX, val);
                     }
                 } else if (line === '21' && i + 1 < lines.length) {
                     const val = parseFloat(lines[i + 1]);
                     if (!isNaN(val) && Math.abs(val) < 1e10) {
                         entityData.y2 = val;
+                        minY = Math.min(minY, val);
+                        maxY = Math.max(maxY, val);
                     }
                 } else if (line === '70' && i + 1 < lines.length && currentEntity === 'LWPOLYLINE') {
                     // Group code 70 contains polyline flags; bit 0 (value & 1) indicates closed
@@ -1047,106 +832,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 entities.push(createEntity(currentEntity, entityData));
             }
 
-            // Calculate bounds from rendered entities only (not raw DXF coordinates)
-            let minX = Infinity, maxX = -Infinity;
-            let minY = Infinity, maxY = -Infinity;
-
-            function updateBounds(x, y) {
-                minX = Math.min(minX, x);
-                maxX = Math.max(maxX, x);
-                minY = Math.min(minY, y);
-                maxY = Math.max(maxY, y);
-            }
-
-            // Calculate bounds only from closed contours + circles (match backend behavior)
-            // But still render all entities for preview
-            console.log(`Calculating bounds from entities (filtering construction geometry)...`);
-            entities.forEach((entity, idx) => {
-                // Skip bounds calculation for isolated LINE/ARC entities
-                // These are construction lines that won't be processed by backend
-                let skipForBounds = false;
-
-                if (entity.type === 'LINE' || entity.type === 'ARC') {
-                    // Check if this is an isolated construction entity (very large)
-                    let isConstruction = false;
-
-                    if (entity.type === 'LINE' && entity.vertices.length === 2) {
-                        const dx = entity.vertices[1].x - entity.vertices[0].x;
-                        const dy = entity.vertices[1].y - entity.vertices[0].y;
-                        const length = Math.sqrt(dx * dx + dy * dy);
-                        if (length > 12.0) {  // Suspiciously long isolated line
-                            isConstruction = true;
-                            console.log(`  Skipping LINE ${idx} for bounds (${length.toFixed(1)}" long, likely construction)`);
-                        }
-                    } else if (entity.type === 'ARC' && entity.radius > 3.0) {
-                        isConstruction = true;
-                        console.log(`  Skipping ARC ${idx} for bounds (${entity.radius.toFixed(1)}" radius, likely construction)`);
-                    }
-
-                    skipForBounds = isConstruction;
-                }
-
-                if (skipForBounds) {
-                    return;  // Skip this entity for bounds calculation
-                }
-                let entityMinX = Infinity, entityMaxX = -Infinity;
-                let entityMinY = Infinity, entityMaxY = -Infinity;
-
-                if (entity.type === 'CIRCLE') {
-                    entityMinX = entity.center.x - entity.radius;
-                    entityMaxX = entity.center.x + entity.radius;
-                    entityMinY = entity.center.y - entity.radius;
-                    entityMaxY = entity.center.y + entity.radius;
-                    updateBounds(entityMinX, entityMinY);
-                    updateBounds(entityMaxX, entityMaxY);
-                } else if (entity.type === 'ARC') {
-                    // Calculate proper arc bounds (not full circle)
-                    const bounds = calculateArcBounds(
-                        entity.center.x,
-                        entity.center.y,
-                        entity.radius,
-                        entity.startAngle || 0,
-                        entity.endAngle || 360
-                    );
-                    updateBounds(bounds.minX, bounds.minY);
-                    updateBounds(bounds.maxX, bounds.maxY);
-                } else if (entity.type === 'LINE') {
-                    entity.vertices.forEach(v => {
-                        entityMinX = Math.min(entityMinX, v.x);
-                        entityMaxX = Math.max(entityMaxX, v.x);
-                        entityMinY = Math.min(entityMinY, v.y);
-                        entityMaxY = Math.max(entityMaxY, v.y);
-                        updateBounds(v.x, v.y);
-                    });
-                } else if (entity.type === 'LWPOLYLINE' || entity.type === 'POLYLINE') {
-                    entity.vertices.forEach(v => {
-                        entityMinX = Math.min(entityMinX, v.x);
-                        entityMaxX = Math.max(entityMaxX, v.x);
-                        entityMinY = Math.min(entityMinY, v.y);
-                        entityMaxY = Math.max(entityMaxY, v.y);
-                        updateBounds(v.x, v.y);
-                    });
-                } else if (entity.type === 'SPLINE' && entity.controlPoints) {
-                    entity.controlPoints.forEach(p => {
-                        entityMinX = Math.min(entityMinX, p.x);
-                        entityMaxX = Math.max(entityMaxX, p.x);
-                        entityMinY = Math.min(entityMinY, p.y);
-                        entityMaxY = Math.max(entityMaxY, p.y);
-                        updateBounds(p.x, p.y);
-                    });
-                }
-
-                // Log entities that extend beyond expected bounds
-                if (entityMinX < -27 || entityMaxX > -9 || entityMinY < -1 || entityMaxY > 8) {
-                    console.log(`  ⚠️ Entity ${idx} (${entity.type}) extends bounds significantly:`);
-                    console.log(`     X=[${entityMinX.toFixed(3)}, ${entityMaxX.toFixed(3)}], Y=[${entityMinY.toFixed(3)}, ${entityMaxY.toFixed(3)}]`);
-                    if (entity.type === 'CIRCLE' || entity.type === 'ARC') {
-                        console.log(`     Center: (${entity.center.x.toFixed(3)}, ${entity.center.y.toFixed(3)}), Radius: ${entity.radius.toFixed(3)}`);
-                    }
-                }
-            });
-            console.log(`After bounds calculation: X=[${minX.toFixed(3)}, ${maxX.toFixed(3)}], Y=[${minY.toFixed(3)}, ${maxY.toFixed(3)}]`);
-
             if (minX === Infinity) {
                 console.warn('⚠️ No valid geometry found, using fallback 10×10 bounds');
                 minX = 0; maxX = 10;
@@ -1158,19 +843,19 @@ document.addEventListener('DOMContentLoaded', () => {
 
             dxfGeometry = {
                 minX, maxX, minY, maxY,
-                entities: entities  // Use all entities for rendering
+                entities: entities
             };
-            dxfBounds = { 
-                width: maxX - minX, 
+            dxfBounds = {
+                width: maxX - minX,
                 height: maxY - minY,
                 centerX: (minX + maxX) / 2,
                 centerY: (minY + maxY) / 2
             };
-            
+
             document.getElementById('modeToggle').style.display = 'flex';
             switchMode('setup');
         }
-        
+
         function createEntity(type, data) {
             if (type === 'CIRCLE') {
                 return {
@@ -1198,8 +883,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 return {
                     type: 'LWPOLYLINE',
                     vertices: data.vertices || [],
-                    closed: data.closed || false,  // Used to filter construction geometry
-                    shape: data.closed || false  // Used by renderer to close path
+                    shape: data.closed || false  // 'shape' property is used by renderer to close path
                 };
             } else if (type === 'SPLINE') {
                 return {
@@ -1213,40 +897,40 @@ document.addEventListener('DOMContentLoaded', () => {
         // Render 2D DXF setup view
         function renderDxfSetup() {
             if (!dxfGeometry || !dxfCtx2D) return;
-            
+
             const ctx = dxfCtx2D;
             const canvas = dxfCanvas2D;
             const width = canvas.width;
             const height = canvas.height;
-            
+
             // Check if canvas has valid size
             if (width === 0 || height === 0) {
                 console.warn('Canvas has zero size, skipping render');
                 return;
             }
-            
+
             // Clear
             ctx.fillStyle = '#0A0E14';
             ctx.fillRect(0, 0, width, height);
-            
+
             // Calculate transform to fit DXF in canvas with padding
             const padding = 80;
             const availWidth = width - 2 * padding;
             const availHeight = height - 2 * padding;
-            
+
             // Apply rotation to bounds for calculating display size
             let displayWidth = dxfBounds.width;
             let displayHeight = dxfBounds.height;
             if (rotationAngle === 90 || rotationAngle === 270) {
                 [displayWidth, displayHeight] = [displayHeight, displayWidth];
             }
-            
+
             const scale = Math.min(availWidth / displayWidth, availHeight / displayHeight);
-            
+
             // Center position (no rotation of entire canvas)
             const centerX = width / 2;
             const centerY = height / 2;
-            
+
             // Helper functions to transform coordinates
             function rotatePoint(x, y, angle) {
                 const rad = -angle * Math.PI / 180; // Negative for clockwise
@@ -1257,37 +941,37 @@ document.addEventListener('DOMContentLoaded', () => {
                     y: x * sin + y * cos
                 };
             }
-            
+
             function toCanvasCoords(x, y) {
                 // Translate to center origin
                 let dx = x - dxfBounds.centerX;
                 let dy = y - dxfBounds.centerY;
-                
+
                 // Apply rotation
                 const rotated = rotatePoint(dx, dy, rotationAngle);
-                
+
                 // Scale and flip Y, then translate to canvas center
                 return {
                     x: centerX + rotated.x * scale,
                     y: centerY - rotated.y * scale
                 };
             }
-            
+
             // Draw all entities (rotated)
             ctx.strokeStyle = '#6B7280';
             ctx.lineWidth = 1.5;
-            
+
             if (dxfGeometry.entities) {
                 dxfGeometry.entities.forEach(entity => {
                     ctx.beginPath();
-                    
+
                     switch(entity.type) {
                         case 'CIRCLE':
                             const cPos = toCanvasCoords(entity.center.x, entity.center.y);
                             ctx.arc(cPos.x, cPos.y, entity.radius * scale, 0, Math.PI * 2);
                             ctx.stroke();
                             break;
-                            
+
                         case 'ARC':
                             const aPos = toCanvasCoords(entity.center.x, entity.center.y);
                             // Y-flip means angles are negated, rotation subtracts from angle
@@ -1295,19 +979,19 @@ document.addEventListener('DOMContentLoaded', () => {
                             const startRad = (-entity.startAngle + rotationAngle) * Math.PI / 180;
                             const endRad = (-entity.endAngle + rotationAngle) * Math.PI / 180;
                             const arcRadius = entity.radius * scale;
-                            
+
                             // Validate arc parameters
                             if (isNaN(startRad) || isNaN(endRad) || arcRadius <= 0 || !isFinite(arcRadius)) {
                                 console.warn('Invalid arc parameters:', { startRad, endRad, arcRadius });
                                 break;
                             }
-                            
+
                             // Y-flip also reverses direction: counter-clockwise becomes clockwise
                             // So we swap start and end to maintain the arc direction
                             ctx.arc(aPos.x, aPos.y, arcRadius, endRad, startRad, false);
                             ctx.stroke();
                             break;
-                            
+
                         case 'LINE':
                             const p1 = toCanvasCoords(entity.vertices[0].x, entity.vertices[0].y);
                             const p2 = toCanvasCoords(entity.vertices[1].x, entity.vertices[1].y);
@@ -1315,7 +999,7 @@ document.addEventListener('DOMContentLoaded', () => {
                             ctx.lineTo(p2.x, p2.y);
                             ctx.stroke();
                             break;
-                            
+
                         case 'LWPOLYLINE':
                         case 'POLYLINE':
                             if (entity.vertices && entity.vertices.length > 0) {
@@ -1331,7 +1015,7 @@ document.addEventListener('DOMContentLoaded', () => {
                                 ctx.stroke();
                             }
                             break;
-                            
+
                         case 'SPLINE':
                             if (entity.controlPoints && entity.controlPoints.length > 1) {
                                 const sp0 = toCanvasCoords(entity.controlPoints[0].x, entity.controlPoints[0].y);
@@ -1343,7 +1027,7 @@ document.addEventListener('DOMContentLoaded', () => {
                                 ctx.stroke();
                             }
                             break;
-                            
+
                         case 'ELLIPSE':
                             const ePos = toCanvasCoords(entity.center.x, entity.center.y);
                             const majorRadius = Math.sqrt(entity.majorAxisEndPoint.x ** 2 + entity.majorAxisEndPoint.y ** 2);
@@ -1354,24 +1038,24 @@ document.addEventListener('DOMContentLoaded', () => {
                     }
                 });
             }
-            
+
             // Calculate bounding box corners in SCREEN coordinates (NOT rotated)
             const boxLeft = centerX - (displayWidth * scale) / 2;
             const boxRight = centerX + (displayWidth * scale) / 2;
             const boxTop = centerY - (displayHeight * scale) / 2;
             const boxBottom = centerY + (displayHeight * scale) / 2;
-            
+
             // Draw bounding box (dashed, NOT rotated)
             ctx.strokeStyle = '#8B949E';
             ctx.lineWidth = 2;
             ctx.setLineDash([5, 5]);
             ctx.strokeRect(boxLeft, boxTop, displayWidth * scale, displayHeight * scale);
             ctx.setLineDash([]);
-            
+
             // Draw origin marker at bottom-left (ALWAYS)
             const originX = boxLeft;
             const originY = boxBottom;
-            
+
             ctx.beginPath();
             ctx.arc(originX, originY, 12, 0, Math.PI * 2);
             ctx.fillStyle = '#FDB515';
@@ -1379,14 +1063,14 @@ document.addEventListener('DOMContentLoaded', () => {
             ctx.strokeStyle = '#FDB515';
             ctx.lineWidth = 3;
             ctx.stroke();
-            
+
             // Draw origin label
             ctx.fillStyle = '#FDB515';
             ctx.font = 'bold 14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
             ctx.fillText('Origin (0,0)', originX, originY - 25);
-            
+
             // Draw axes from bottom-left origin
             // X axis (red) - points right
             ctx.beginPath();
@@ -1395,11 +1079,11 @@ document.addEventListener('DOMContentLoaded', () => {
             ctx.strokeStyle = '#FF0000';
             ctx.lineWidth = 2;
             ctx.stroke();
-            
+
             ctx.fillStyle = '#FF0000';
             ctx.font = 'bold 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
             ctx.fillText('X', originX + 70, originY);
-            
+
             // Y axis (green) - points up
             ctx.beginPath();
             ctx.moveTo(originX, originY);
@@ -1407,43 +1091,20 @@ document.addEventListener('DOMContentLoaded', () => {
             ctx.strokeStyle = '#00FF00';
             ctx.lineWidth = 2;
             ctx.stroke();
-            
+
             ctx.fillStyle = '#00FF00';
             ctx.fillText('Y', originX, originY - 70);
-            
+
             // Draw dimensions at top
+            ctx.fillStyle = '#8B949E';
             ctx.font = '14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
             ctx.textAlign = 'center';
             ctx.textBaseline = 'top';
-
-            // Check if part fits within machine bounds
-            const machineXMax = window.MACHINE_CONFIG?.xMax || 48.0;
-            const machineYMax = window.MACHINE_CONFIG?.yMax || 96.0;
-            const fitsInMachine = displayWidth <= machineXMax && displayHeight <= machineYMax;
-
-            if (fitsInMachine) {
-                ctx.fillStyle = '#8B949E';
-                ctx.fillText(
-                    `${displayWidth.toFixed(2)}" × ${displayHeight.toFixed(2)}" (${rotationAngle}°)`,
-                    width / 2,
-                    20
-                );
-            } else {
-                // Part exceeds machine bounds - show error
-                ctx.fillStyle = '#FF4444';
-                ctx.fillText(
-                    `⚠️ ${displayWidth.toFixed(2)}" × ${displayHeight.toFixed(2)}" (${rotationAngle}°) - TOO LARGE`,
-                    width / 2,
-                    20
-                );
-                ctx.fillStyle = '#FF4444';
-                ctx.font = '12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
-                ctx.fillText(
-                    `Machine max: ${machineXMax.toFixed(0)}" × ${machineYMax.toFixed(0)}" - Rotate or reduce size`,
-                    width / 2,
-                    40
-                );
-            }
+            ctx.fillText(
+                `${displayWidth.toFixed(2)}" × ${displayHeight.toFixed(2)}" (${rotationAngle}°)`,
+                width / 2,
+                20
+            );
         }
 
         // G-code visualization
@@ -1595,173 +1256,6 @@ document.addEventListener('DOMContentLoaded', () => {
         function animate() {
             requestAnimationFrame(animate);
             renderer.render(scene, camera);
-        }
-
-        /**
-         * Render DXF geometry entities as white lines on the stock top surface
-         * This shows the "cutting geometry" - the original design shapes
-         */
-        function renderDxfGeometry(scene, entities, zHeight) {
-            if (!dxfBounds) return;
-
-            const dxfMaterial = new THREE.LineBasicMaterial({
-                color: 0xFFFFFF, // White for visibility
-                linewidth: 2,
-                opacity: 0.8,
-                transparent: true
-            });
-
-            // Calculate rotated bounding box to determine offset
-            // We need to rotate all points, find their bounds, then offset so min is at (0,0)
-            const radians = rotationAngle * Math.PI / 180;
-            const cos = Math.cos(radians);
-            const sin = Math.sin(radians);
-
-            // Helper to rotate a point around DXF center
-            function rotatePoint(x, y) {
-                // Translate to origin
-                const tx = x - dxfBounds.centerX;
-                const ty = y - dxfBounds.centerY;
-                // Rotate
-                const rx = tx * cos - ty * sin;
-                const ry = tx * sin + ty * cos;
-                // Translate back
-                return { x: rx + dxfBounds.centerX, y: ry + dxfBounds.centerY };
-            }
-
-            // First pass: find bounding box of rotated geometry
-            let minX = Infinity, maxX = -Infinity;
-            let minY = Infinity, maxY = -Infinity;
-
-            entities.forEach(entity => {
-                function updateBounds(x, y) {
-                    const rotated = rotatePoint(x, y);
-                    minX = Math.min(minX, rotated.x);
-                    maxX = Math.max(maxX, rotated.x);
-                    minY = Math.min(minY, rotated.y);
-                    maxY = Math.max(maxY, rotated.y);
-                }
-
-                switch(entity.type) {
-                    case 'LINE':
-                        updateBounds(entity.vertices[0].x, entity.vertices[0].y);
-                        updateBounds(entity.vertices[1].x, entity.vertices[1].y);
-                        break;
-                    case 'CIRCLE':
-                        // Sample circle perimeter
-                        for (let i = 0; i < 8; i++) {
-                            const angle = (i / 8) * 2 * Math.PI;
-                            const x = entity.center.x + entity.radius * Math.cos(angle);
-                            const y = entity.center.y + entity.radius * Math.sin(angle);
-                            updateBounds(x, y);
-                        }
-                        break;
-                    case 'ARC':
-                        // Sample arc perimeter
-                        const startAngle = (entity.startAngle || 0) * Math.PI / 180;
-                        const endAngle = (entity.endAngle || 360) * Math.PI / 180;
-                        for (let i = 0; i <= 8; i++) {
-                            const t = i / 8;
-                            const angle = startAngle + (endAngle - startAngle) * t;
-                            const x = entity.center.x + entity.radius * Math.cos(angle);
-                            const y = entity.center.y + entity.radius * Math.sin(angle);
-                            updateBounds(x, y);
-                        }
-                        break;
-                    case 'LWPOLYLINE':
-                    case 'POLYLINE':
-                        entity.vertices.forEach(v => updateBounds(v.x, v.y));
-                        break;
-                    case 'SPLINE':
-                        if (entity.controlPoints) {
-                            entity.controlPoints.forEach(p => updateBounds(p.x, p.y));
-                        }
-                        break;
-                }
-            });
-
-            // Helper to transform a point: rotate around center, then translate so lower-left is at (0,0)
-            function transformPoint(x, y) {
-                // Rotate
-                const rotated = rotatePoint(x, y);
-                // Translate so lower-left (minX, minY) is at origin
-                const tx = rotated.x - minX;
-                const ty = rotated.y - minY;
-                // Map to Three.js coordinates: X -> X, Y -> -Z
-                return new THREE.Vector3(tx, zHeight, -ty);
-            }
-
-            entities.forEach(entity => {
-                let points = [];
-
-                switch(entity.type) {
-                    case 'LINE':
-                        // Straight line from start to end
-                        points = [
-                            transformPoint(entity.vertices[0].x, entity.vertices[0].y),
-                            transformPoint(entity.vertices[1].x, entity.vertices[1].y)
-                        ];
-                        break;
-
-                    case 'CIRCLE':
-                        // Full circle - tessellate into line segments
-                        {
-                            const numPoints = 50;
-                            for (let i = 0; i <= numPoints; i++) {
-                                const angle = (i / numPoints) * 2 * Math.PI;
-                                const x = entity.center.x + entity.radius * Math.cos(angle);
-                                const y = entity.center.y + entity.radius * Math.sin(angle);
-                                points.push(transformPoint(x, y));
-                            }
-                        }
-                        break;
-
-                    case 'ARC':
-                        // Partial arc - tessellate into line segments
-                        {
-                            const startAngle = (entity.startAngle || 0) * Math.PI / 180;
-                            const endAngle = (entity.endAngle || 360) * Math.PI / 180;
-                            const numPoints = 50;
-
-                            for (let i = 0; i <= numPoints; i++) {
-                                const t = i / numPoints;
-                                const angle = startAngle + (endAngle - startAngle) * t;
-                                const x = entity.center.x + entity.radius * Math.cos(angle);
-                                const y = entity.center.y + entity.radius * Math.sin(angle);
-                                points.push(transformPoint(x, y));
-                            }
-                        }
-                        break;
-
-                    case 'LWPOLYLINE':
-                    case 'POLYLINE':
-                        // Connected line segments through vertices
-                        points = entity.vertices.map(v => transformPoint(v.x, v.y));
-                        // Close the polyline if it's marked as closed
-                        if (entity.closed && points.length > 0) {
-                            points.push(points[0].clone());
-                        }
-                        break;
-
-                    case 'SPLINE':
-                        // Approximate spline with control points
-                        if (entity.controlPoints && entity.controlPoints.length > 1) {
-                            points = entity.controlPoints.map(p => transformPoint(p.x, p.y));
-                        }
-                        break;
-
-                    default:
-                        // Skip unsupported entity types
-                        return;
-                }
-
-                // Create and add the line to the scene
-                if (points.length >= 2) {
-                    const geometry = new THREE.BufferGeometry().setFromPoints(points);
-                    const line = new THREE.Line(geometry, dxfMaterial);
-                    scene.add(line);
-                }
-            });
         }
 
         function visualizeGcode(gcode) {
@@ -1971,11 +1465,9 @@ document.addEventListener('DOMContentLoaded', () => {
             scene.add(sacrificeOutline);
 
             // Add stock material as semi-transparent solid
+            const stockWidth = maxX - minX;
+            const stockDepth = maxY - minY;
             const stockHeight = stockHeightValue; // Use tube height for tubes, thickness for plates
-
-            // Calculate stock dimensions
-            let stockWidth, stockDepth;
-            let stockCenterX, stockCenterZ; // Center position for stock box
 
             // Calculate and display stock size
             const toolDiameter = parseFloat(document.getElementById('toolDiameter').value) || 0.157;
@@ -1983,20 +1475,8 @@ document.addEventListener('DOMContentLoaded', () => {
             const stockSizeValue = document.getElementById('stockSizeValue');
 
             if (isAluminumTube) {
-                // For tube: use DXF pattern dimensions for stock box (actual tube size)
-                // Account for rotation
-                let dxfWidth = dxfBounds ? dxfBounds.width : (maxX - minX);
-                let dxfHeight = dxfBounds ? dxfBounds.height : (maxY - minY);
-                if (rotationAngle === 90 || rotationAngle === 270) {
-                    [dxfWidth, dxfHeight] = [dxfHeight, dxfWidth];
-                }
-
-                stockWidth = dxfWidth;
-                stockDepth = dxfHeight;
-                stockCenterX = (minX + maxX) / 2;
-                stockCenterZ = -(minY + maxY) / 2;
-
-                // Display tube size
+                // For tube: show profile dimensions × length (no margin)
+                // Tube height from form input, tube width from DXF short dimension
                 const tubeHeightInput = parseFloat(document.getElementById('tubeHeight').value) || 1.0;
                 const dxfShort = dxfBounds ? Math.min(dxfBounds.width, dxfBounds.height) : Math.min(stockWidth, stockDepth);
                 const tubeLength = dxfBounds ? Math.max(dxfBounds.width, dxfBounds.height) : Math.max(stockWidth, stockDepth);
@@ -2007,13 +1487,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     stockSizeDisplay.style.display = 'flex';
                 }
             } else {
-                // For plates: use toolpath extents (show where the tool moves)
-                stockWidth = maxX - minX;
-                stockDepth = maxY - minY;
-                stockCenterX = (minX + maxX) / 2;
-                stockCenterZ = -(minY + maxY) / 2;
-
-                // Display stock size: DXF bounding box + tool margin only if cutting perimeter
+                // For plates: DXF bounding box + tool margin only if cutting perimeter
                 // Account for rotation - swap DXF dimensions if rotated 90 or 270 degrees
                 let dxfWidth = dxfBounds ? dxfBounds.width : stockWidth;
                 let dxfHeight = dxfBounds ? dxfBounds.height : stockDepth;
@@ -2054,24 +1528,19 @@ document.addEventListener('DOMContentLoaded', () => {
             const stockMesh = new THREE.Mesh(stockGeometry, stockMaterial);
             // Position at center of stock, halfway up from sacrifice board
             stockMesh.position.set(
-                stockCenterX,
+                (minX + maxX) / 2,
                 stockHeight / 2,
-                stockCenterZ
+                -(minY + maxY) / 2
             );
             stockMesh.renderOrder = -1; // Render stock before toolpaths
             scene.add(stockMesh);
 
-            // Render DXF geometry overlay (white lines on stock top surface)
-            if (dxfGeometry && dxfGeometry.entities) {
-                renderDxfGeometry(scene, dxfGeometry.entities, stockHeight);
-            }
-
             // Create tool representation (endmill)
             const toolLength = Math.max(maxZ * 1.5, 1.0);
             const toolGeometry = new THREE.CylinderGeometry(
-                toolDiameter / 2, 
-                toolDiameter / 2, 
-                toolLength, 
+                toolDiameter / 2,
+                toolDiameter / 2,
+                toolLength,
                 16
             );
             const toolMaterial = new THREE.MeshStandardMaterial({
@@ -2091,10 +1560,10 @@ document.addEventListener('DOMContentLoaded', () => {
             const scrubber = document.getElementById('toolpathScrubber');
             const scrubberContainer = document.getElementById('scrubberContainer');
             scrubberContainer.style.display = 'block';
-            
+
             scrubber.max = toolpathMoves.length - 1;
             scrubber.value = 0;
-            
+
             scrubber.oninput = (e) => {
                 const moveIndex = parseInt(e.target.value);
                 updateToolpathDisplay(moveIndex);
@@ -2193,13 +1662,13 @@ document.addEventListener('DOMContentLoaded', () => {
             if (toolpathMoves.length === 0) return;
 
             // Update scrubber labels
-            document.getElementById('scrubberLabel').textContent = 
+            document.getElementById('scrubberLabel').textContent =
                 `Move ${moveIndex + 1} of ${toolpathMoves.length}`;
-            
+
             const currentMove = toolpathMoves[moveIndex];
             const moveType = currentMove.type === 'G0' ? 'Rapid' : 'Cut';
             document.getElementById('scrubberOperation').textContent =
-                `${moveType}: ${currentMove.line}`;
+                `${moveType}: ${currentMove.line.substring(0, 40)}`;
 
             // Update tool position
             if (toolMesh) {
@@ -2227,11 +1696,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 const upcomingGeometry = new THREE.BufferGeometry().setFromPoints(upcomingPoints);
                 upcomingLine = new THREE.Line(
                     upcomingGeometry,
-                    new THREE.LineBasicMaterial({ 
-                        color: 0xFDB515, 
+                    new THREE.LineBasicMaterial({
+                        color: 0xFDB515,
                         linewidth: 3,
-                        opacity: 0.8, 
-                        transparent: true 
+                        opacity: 0.8,
+                        transparent: true
                     })
                 );
                 scene.add(upcomingLine);
@@ -2284,24 +1753,15 @@ document.addEventListener('DOMContentLoaded', () => {
                 return; // Don't try to load DXF
             }
 
-            // Show info alert if using default config
-            const usingDefaultConfig = window.ONSHAPE_DATA?.usingDefaultConfig || false;
-            if (usingDefaultConfig) {
-                const configInfoAlert = document.getElementById('configInfoAlert');
-                if (configInfoAlert) {
-                    configInfoAlert.style.display = 'block';
-                }
-            }
-
             // Auto-load DXF if coming from Onshape
             const dxfFile = window.ONSHAPE_DATA?.dxfFile || '';
             const fromOnshape = window.ONSHAPE_DATA?.fromOnshape || false;
             const onshapeSuggestedFilename = window.ONSHAPE_DATA?.suggestedFilename || '';
-            
+
             if (dxfFile && fromOnshape) {
                 console.log('Auto-loading DXF from Onshape:', dxfFile);
                 console.log('Fetching from:', `/uploads/${dxfFile}`);
-                
+
                 // Fetch the DXF and load it
                 fetch(`/uploads/${dxfFile}`)
                     .then(response => {
@@ -2316,35 +1776,19 @@ document.addEventListener('DOMContentLoaded', () => {
                         console.log('First 200 chars:', dxfContent.substring(0, 200));
 
                         // Create a File object from the DXF content
-                        // Use suggested filename (not token) for the File object name
-                        const filename = onshapeSuggestedFilename ?
-                            `${onshapeSuggestedFilename}.dxf` :
-                            (dxfFile.endsWith('.dxf') ? dxfFile : `${dxfFile}.dxf`);
                         const blob = new Blob([dxfContent], { type: 'application/dxf' });
-                        const file = new File([blob], filename, { type: 'application/dxf' });
+                        const file = new File([blob], dxfFile, { type: 'application/dxf' });
 
-                        // Use appState to store file (accessible across scopes)
-                        appState.uploadedFile = file;
-                        appState.suggestedFilename = onshapeSuggestedFilename || null;
-
-                        // Update UI elements
-                        const fileNameEl = document.getElementById('fileName');
-                        const fileSizeEl = document.getElementById('fileSize');
-                        const fileLoadedCardEl = document.getElementById('fileLoadedCard');
-                        const dropZoneEl = document.getElementById('dropZone');
-                        const generateBtnEl = document.getElementById('generateBtn');
-
-                        if (fileNameEl) fileNameEl.textContent = filename;
-                        if (fileSizeEl) fileSizeEl.textContent = formatFileSize(dxfContent.length);
-
-                        // Show file loaded card, hide drop zone
-                        if (dropZoneEl) dropZoneEl.style.display = 'none';
-                        if (fileLoadedCardEl) fileLoadedCardEl.style.display = 'block';
-
-                        if (generateBtnEl) {
-                            generateBtnEl.disabled = false;
-                            generateBtnEl.textContent = '🚀 Generate Program';
-                        }
+                        // Set file state and enable generate button
+                        uploadedFile = file;
+                        suggestedFilename = onshapeSuggestedFilename || null; // Store suggested name
+                        fileName.textContent = dxfFile;
+                        fileSize.textContent = formatFileSize(dxfContent.length);
+                        fileInfo.style.display = 'flex';
+                        generateBtn.disabled = false;
+                        generateBtn.textContent = '🚀 Generate Program';
+                        hideError();
+                        hideResults();
 
                         // Parse for 2D setup view
                         parseDxfForSetup(dxfContent);
@@ -2354,6 +1798,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         if (statusDiv) {
                             statusDiv.textContent = '✅ Imported from Onshape! Orient your part and click Generate G-code.';
                             statusDiv.style.display = 'block';
+                            statusDiv.className = 'success';
                         }
                     })
                     .catch(error => {
@@ -2374,7 +1819,7 @@ document.addEventListener('DOMContentLoaded', () => {
             camera.aspect = container.clientWidth / container.clientHeight;
             camera.updateProjectionMatrix();
             renderer.setSize(container.clientWidth, container.clientHeight);
-            
+
             // Also resize DXF canvas to maintain correct aspect ratio
             if (dxfCanvas2D && dxfGeometry) {
                 const rect = dxfCanvas2D.getBoundingClientRect();

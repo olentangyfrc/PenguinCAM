@@ -147,13 +147,24 @@
                                 <span class="label-hint">Cutting parameters preset</span>
                             </label>
                             <select id="material" required>
-                                {% for material_id, material_info in materials.items() %}
-                                <option value="{{ material_id }}"
-                                        {% if material_id == 'plywood' %}selected{% endif %}
-                                        {% if material_id in incomplete_materials %}data-incomplete="true"{% endif %}>
-                                    {{ material_info.name }}
-                                </option>
-                                {% endfor %}
+
+                                      {% if materials is defined and materials %}
+                                        {% for material_id, material_info in materials.items() %}
+                                          <option value="{{ material_id }}"
+                                            {% if material_id in incomplete_materials %}disabled{% endif %}>
+                                            {{ material_info.name }}
+                                            {% if material_id in incomplete_materials %}(incomplete){% endif %}
+                                          </option>
+                                        {% endfor %}
+
+                                      {% else %}
+                                          <!-- Fallback so page never breaks -->
+                                          <option value="plywood">Plywood</option>
+                                          <option value="aluminum">Aluminum</option>
+                                          <option value="polycarbonate">Polycarbonate</option>
+                                      {% endif %}
+
+
                             </select>
                             <div id="materialWarning" class="warning-message" style="display: none;">
                                 ⚠️ This material has incomplete settings in your config. Using plywood defaults for missing parameters.

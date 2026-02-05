@@ -460,17 +460,19 @@ def index():
 def process_file():
     """Process uploaded DXF file and generate G-code"""
     try:
+
         # Get uploaded file
         if 'file' not in request.files:
             return jsonify({'error': 'No file uploaded'}), 400
-        
+
         file = request.files['file']
+        print("received file " + file.filename)
         if file.filename == '':
             return jsonify({'error': 'No file selected'}), 400
-        
+
         if not file.filename.lower().endswith('.dxf'):
             return jsonify({'error': 'File must be a DXF file'}), 400
-        
+
         # Get parameters
         material = request.form.get('material', 'plywood')
         is_aluminum_tube = (material.lower() == 'aluminum_tube')
@@ -855,7 +857,7 @@ def upload_to_drive(token):
                 'success': False,
                 'message': 'File not found'
             }), 404
-        
+
         # Get credentials from session
         creds = None
         if AUTH_AVAILABLE and auth.is_enabled():
@@ -868,11 +870,11 @@ def upload_to_drive(token):
                     'message': 'Not authenticated with Google Drive'
                 }), 401
             log(f"✅ Got credentials, scopes: {creds.scopes if hasattr(creds, 'scopes') else 'unknown'}")
-        
+
         # Create uploader with credentials
         log("🔧 Creating GoogleDriveUploader...")
         uploader = GoogleDriveUploader(credentials=creds)
-        
+
         log("🔐 Authenticating...")
         if not uploader.authenticate():
             log("❌ Authentication failed")
@@ -880,7 +882,7 @@ def upload_to_drive(token):
                 'success': False,
                 'message': 'Failed to authenticate with Google Drive'
             }), 500
-        
+
         log("✅ Authenticated, uploading file...")
         # Upload the file with real filename
         result = uploader.upload_file(file_path, real_filename)
@@ -901,7 +903,7 @@ def upload_to_drive(token):
                 'success': False,
                 'message': result.get('message') if result else 'Upload failed'
             }), 500
-            
+
     except Exception as e:
         return jsonify({
             'success': False,
@@ -934,7 +936,7 @@ def onshape_auth():
 
         # Redirect user to Onshape for authorization
         return redirect(auth_url)
-        
+
     except Exception as e:
         return jsonify({'error': f'OAuth initialization failed: {str(e)}'}), 500
 
@@ -1014,7 +1016,7 @@ def onshape_oauth_callback():
 
         # Otherwise redirect to main page with success message
         return redirect('/?onshape_connected=true')
-        
+
     except Exception as e:
         return f"OAuth callback error: {str(e)}", 500
 
@@ -1265,7 +1267,7 @@ def onshape_import():
             log(f"   ℹ️  No body_id - will search all parts")
 
         log(f"{'='*70}\n")
-        
+
         # WORKAROUND: If params have placeholder strings, we can't proceed
         if (document_id and ('${' in str(document_id) or document_id.startswith('$'))):
             log("❌ Onshape variable substitution failed!")
@@ -1448,7 +1450,7 @@ def onshape_import():
                     'element_id': element_id
                 }
             }), 500
-        
+
         log(f"📄 DXF content received: {len(dxf_content)} bytes")
 
         # Generate filename: try to combine document name + part name
@@ -1493,41 +1495,11 @@ def onshape_import():
         # Render main page with DXF auto-loaded
         # The frontend will detect the dxf_file parameter and auto-upload it
 
-        # Reconstruct TeamConfig to get materials list
-        team_config_data = session.get('team_config_data', {})
-        team_config = TeamConfig(team_config_data)
-
-        # Get available machines
-        machines = team_config.get_available_machines()
-
-        # Get current machine (from session, or use default)
-        current_machine_id = session.get('machine_id', team_config.default_machine_id)
-
-        # Get machine-specific config dict
-        team_config_dict = team_config.to_dict(current_machine_id)
-        drive_enabled = team_config_dict.get('google_drive_enabled', False)
-        machine_x_max = team_config_dict.get('machine_x_max', 48.0)
-        machine_y_max = team_config_dict.get('machine_y_max', 96.0)
-        default_tool_diameter = team_config_dict.get('default_tool_diameter', 0.157)
-
-        # Get user/team info
-        user_name = session.get('user_name')
-        team_name = session.get('team_name')
-
-        # Get available materials for current machine
-        available_materials = team_config.get_available_materials(current_machine_id)
-
-        # Add 'aluminum_tube' as a special UI-only material (uses aluminum preset)
-        available_materials['aluminum_tube'] = {
-            **available_materials.get('aluminum', {}),
-            'name': 'Aluminum Tube'
-        }
-
-        # Check for incomplete materials
-        incomplete_materials = {
-            material_id for material_id in available_materials.keys()
-            if not team_config.is_material_complete(material_id, current_machine_id) and material_id != 'aluminum_tube'
-        }
+        # Get config values from session for template
+        team_config = session.get('team_config', {})
+        machine_x_max = team_config.get('machine_x_max', 48.0)
+        machine_y_max = team_config.get('machine_y_max', 96.0)
+        default_tool_diameter = team_config.get('default_tool_diameter', 0.157)
 
         return render_template('index.html',
                              dxf_file=dxf_token,  # Pass token instead of filename
@@ -1535,18 +1507,11 @@ def onshape_import():
                              document_id=document_id,
                              face_id=face_id,
                              suggested_filename=suggested_filename or '',
-                             user_name=user_name,
-                             team_name=team_name,
-                             drive_enabled=drive_enabled,
                              machine_x_max=machine_x_max,
                              machine_y_max=machine_y_max,
                              default_tool_diameter=default_tool_diameter,
-                             using_default_config=session.get('using_default_config', False),
-                             machines=machines,
-                             current_machine_id=current_machine_id,
-                             materials=available_materials,
-                             incomplete_materials=incomplete_materials)
-        
+                             using_default_config=session.get('using_default_config', False))
+
     except Exception as e:
         return jsonify({
             'error': f'Import failed: {str(e)}'
@@ -1768,7 +1733,7 @@ if not IS_SERVERLESS:
 if __name__ == '__main__':
     # Get port from environment variable (Railway) or default to 6238 for local dev
     port = int(os.environ.get('PORT', 6238))
-    
+
     log("="*70)
     log("PenguinCAM - FRC Team 6238")
     log("="*70)
@@ -1778,7 +1743,7 @@ if __name__ == '__main__':
     log(f"📂 Server will run on port: {port}")
     log("\n⚠️  Press Ctrl+C to stop the server\n")
     log("="*70)
-    
+
     # Disable debug mode in production
     debug_mode = os.environ.get('FLASK_ENV') != 'production'
     app.run(debug=debug_mode, host='0.0.0.0', port=port)

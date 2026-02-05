@@ -430,7 +430,9 @@ class TeamConfig:
         materials = dict(TEAM_6238_DEFAULTS['materials'])
 
         # Add/override with machine-specific materials
-        machine_materials = machine_config.get('materials', {})
+        machine_materials = machine_config.get('materials') or {}
+        if not isinstance(machine_materials, dict):
+            raise TypeError(f"'materials' must be a mapping/dict, got {type(machine_materials).__name__}")
         for material_id, material_data in machine_materials.items():
             # Get complete material preset (with fallback)
             materials[material_id] = self.get_material_preset(material_id, machine_id)
