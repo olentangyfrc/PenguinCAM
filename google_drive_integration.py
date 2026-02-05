@@ -4,6 +4,7 @@ Saves G-code files directly to team's shared Google Drive
 """
 
 import os
+import sys
 import json
 import pickle
 from pathlib import Path
@@ -13,6 +14,22 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from googleapiclient.errors import HttpError
+import logging
+
+# Configure logging for Vercel
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(message)s',
+    stream=sys.stderr,
+    force=True
+)
+logger = logging.getLogger(__name__)
+
+# Logging helper for Vercel/serverless environments
+def log(*args, **kwargs):
+    """Log to stderr using Python logging module for better Vercel compatibility"""
+    message = ' '.join(str(arg) for arg in args)
+    logger.info(message)
 
 # Scopes needed - only Drive file access
 SCOPES = ['https://www.googleapis.com/auth/drive.file']
@@ -41,12 +58,15 @@ class GoogleDriveUploader:
         if os.path.exists(config_file):
             with open(config_file, 'r') as f:
                 return json.load(f)
-        
+
         # Environment variables override
+        # Check both GOOGLE_DRIVE_FOLDER_ID (preferred) and DRIVE_FOLDER_ID (legacy)
+        folder_id = os.environ.get('GOOGLE_DRIVE_FOLDER_ID') or os.environ.get('DRIVE_FOLDER_ID')
+
         return {
             'shared_drive_name': os.environ.get('DRIVE_NAME', 'Popcorn Penguins'),
             'folder_path': os.environ.get('DRIVE_FOLDER', 'CNC/G-code'),
-            'folder_id': os.environ.get('DRIVE_FOLDER_ID')
+            'folder_id': folder_id
         }
     
     def _save_config(self):
@@ -66,7 +86,7 @@ class GoogleDriveUploader:
             self.service = build('drive', 'v3', credentials=self.credentials)
             return True
         except Exception as e:
-            print(f"Drive authentication error: {e}")
+            log(f"Drive authentication error: {e}")
             return False
     
     def find_shared_drive(self, drive_name):
@@ -83,7 +103,7 @@ class GoogleDriveUploader:
             
             return None
         except HttpError as error:
-            print(f"Error finding shared drive: {error}")
+            log(f"Error finding shared drive: {error}")
             return None
     
     def find_folder_in_drive(self, drive_id, folder_path):
@@ -125,7 +145,7 @@ class GoogleDriveUploader:
                 current_folder_id = folders[0]['id']
                 
             except HttpError as error:
-                print(f"Error finding folder '{folder_name}': {error}")
+                log(f"Error finding folder '{folder_name}': {error}")
                 return None
         
         return current_folder_id
@@ -149,7 +169,7 @@ class GoogleDriveUploader:
             return folder['id']
             
         except HttpError as error:
-            print(f"Error creating folder: {error}")
+            log(f"Error creating folder: {error}")
             return None
     
     def upload_file(self, file_path, filename=None):

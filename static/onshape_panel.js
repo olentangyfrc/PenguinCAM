@@ -7,11 +7,8 @@
 
     // DOM elements
     const instruction = document.getElementById('instruction');
-    const faceInfo = document.getElementById('faceInfo');
-    const faceIdDisplay = document.getElementById('faceId');
     const buttonGroup = document.getElementById('buttonGroup');
     const sendBtn = document.getElementById('sendToPenguinCAM');
-    const driveBtn = document.getElementById('saveToDrive');
 
     // Onshape context from template
     const context = window.ONSHAPE_CONTEXT;
@@ -37,9 +34,22 @@
         // Listen for messages from Onshape
         window.addEventListener('message', handleMessage);
 
+        // Request current selection state (in case face is already selected)
+        // Onshape will respond with a SELECTION message
+        // Do this AFTER listener is set up so we can receive the response
+        const selectionMessage = {
+            messageName: 'requestSelection',
+            messageId: 'penguincam-init-' + Date.now(), // Unique ID for this request
+            documentId: context.documentId,
+            workspaceId: context.workspaceId,
+            elementId: context.elementId,
+            entityTypeSpecifier: ['FACE'] // Array of entity types we're looking for
+        };
+        // window.parent.postMessage(selectionMessage, '*');
+        console.log('Requested current selection:', selectionMessage);
+
         // Set up button handlers
         sendBtn.addEventListener('click', handleSendToPenguinCAM);
-        driveBtn.addEventListener('click', handleSaveToDrive);
     }
 
     /**
@@ -73,34 +83,65 @@
         );
 
         if (faceSelection) {
-            // Face selected
+            // Valid face selected
             selectedFaceId = faceSelection.selectionId;
             selectedPartId = faceSelection.partId || null;
 
-            // Update UI
+            // Update UI - hide instruction, show button
             instruction.style.display = 'none';
-            faceInfo.style.display = 'block';
             buttonGroup.style.display = 'flex';
-            faceIdDisplay.textContent = selectedFaceId;
 
-            // Enable buttons
+            // Enable button
             sendBtn.disabled = false;
-            driveBtn.disabled = false;
 
-            console.log('Face selected:', selectedFaceId, 'Part:', selectedPartId);
+            console.log('✓ Face selected:', selectedFaceId, 'Part:', selectedPartId, 'Full selection:', faceSelection);
         } else {
-            // No face selected - reset UI
+            // No valid face - reset state
             selectedFaceId = null;
             selectedPartId = null;
+            buttonGroup.style.display = 'none';
+            sendBtn.disabled = true;
+
+            // Check for common mistakes and show helpful message
+            if (selections.length === 0) {
+                // Nothing selected
+                instruction.innerHTML = 'Select a face to export';
+                instruction.style.color = '';
+            } else {
+                // Something selected, but not a face - provide helpful guidance
+                const selection = selections[0];
+                const entityType = selection.entityType;
+
+                console.log('✗ Invalid selection:', entityType);
+
+                if (entityType && entityType.startsWith('SKETCH')) {
+                    // User selected part of a sketch
+                    instruction.innerHTML = '⚠️ You selected a sketch element.<br>Please select a <strong>face of a solid part</strong> instead.';
+                    instruction.style.color = '#FBB515';
+                } else if (entityType === 'EDGE') {
+                    // User selected an edge
+                    instruction.innerHTML = '⚠️ You selected an edge.<br>Please select a <strong>flat face</strong> instead.';
+                    instruction.style.color = '#FBB515';
+                } else if (entityType === 'VERTEX') {
+                    // User selected a vertex/point
+                    instruction.innerHTML = '⚠️ You selected a vertex.<br>Please select a <strong>flat face</strong> instead.';
+                    instruction.style.color = '#FBB515';
+                } else if (entityType === 'BODY') {
+                    // User selected entire body
+                    instruction.innerHTML = '⚠️ You selected an entire body.<br>Please select a <strong>single flat face</strong> instead.';
+                    instruction.style.color = '#FBB515';
+                } else if (entityType === 'MATE_CONNECTOR') {
+                    // User selected a mate connector
+                    instruction.innerHTML = '⚠️ You selected a mate connector.<br>Please select a <strong>flat face</strong> instead.';
+                    instruction.style.color = '#FBB515';
+                } else {
+                    // Unknown entity type
+                    instruction.innerHTML = `⚠️ Invalid selection (${entityType}).<br>Please select a <strong>flat face of a solid part</strong>.`;
+                    instruction.style.color = '#FBB515';
+                }
+            }
 
             instruction.style.display = 'block';
-            faceInfo.style.display = 'none';
-            buttonGroup.style.display = 'none';
-
-            sendBtn.disabled = true;
-            driveBtn.disabled = true;
-
-            console.log('No face selected');
         }
     }
 
@@ -138,60 +179,6 @@
 
         // Open in new tab (without window features to make it a tab, not popup)
         window.open(url, '_blank');
-    }
-
-    /**
-     * Handle "Save DXF to Drive" button
-     * Directly saves to Drive without opening full UI
-     */
-    function handleSaveToDrive() {
-        const url = buildUrl('/onshape/save-dxf');
-        console.log('Saving to Drive:', url);
-
-        // Show loading state
-        driveBtn.disabled = true;
-        driveBtn.textContent = 'Saving...';
-
-        // Make request to save endpoint
-        fetch(url, {
-            method: 'GET',
-            credentials: 'include'  // Include cookies for auth
-        })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                // Success!
-                driveBtn.textContent = 'Saved!';
-                driveBtn.style.background = '#4CAF50';
-
-                // Show success message
-                alert(`Success! DXF saved to Google Drive:\n${data.filename}`);
-
-                // Reset after delay
-                setTimeout(() => {
-                    driveBtn.disabled = false;
-                    driveBtn.textContent = 'Save DXF to Drive';
-                    driveBtn.style.background = '';
-                }, 2000);
-            } else {
-                throw new Error(data.error || 'Save failed');
-            }
-        })
-        .catch(error => {
-            console.error('Save error:', error);
-            driveBtn.textContent = 'Failed';
-            driveBtn.style.background = '#f44336';
-
-            // Show error
-            alert(`Error saving to Drive:\n${error.message}`);
-
-            // Reset
-            setTimeout(() => {
-                driveBtn.disabled = false;
-                driveBtn.textContent = 'Save DXF to Drive';
-                driveBtn.style.background = '';
-            }, 2000);
-        });
     }
 
     // Initialize when DOM is ready

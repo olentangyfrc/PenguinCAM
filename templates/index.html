@@ -54,6 +54,24 @@
             <div class="user-details">
                 <span class="user-icon">👤</span>
                 <span class="user-name">{{ session.get('user_name') }}</span>
+                <div class="dropdown-container">
+                    <button id="settingsBtn" class="icon-btn" title="Settings">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path>
+                            <circle cx="12" cy="12" r="3"></circle>
+                        </svg>
+                    </button>
+                    <div id="settingsDropdown" class="dropdown-menu" style="display: none;">
+                        <a href="#" id="downloadConfigBtn" class="dropdown-item">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                                <polyline points="7 10 12 15 17 10"></polyline>
+                                <line x1="12" y1="15" x2="12" y2="3"></line>
+                            </svg>
+                            Download configuration template
+                        </a>
+                    </div>
+                </div>
             </div>
             <a href="/auth/logout" class="logout-btn">Logout</a>
         </div>
@@ -71,6 +89,7 @@
                         <div class="panel-title">Upload DXF File</div>
                     </div>
 
+                    <!-- Big drop zone (shown when no file loaded) -->
                     <div class="drop-zone" id="dropZone">
                         <div class="drop-zone-icon">📄</div>
                         <div class="drop-zone-text">Drag & drop your DXF file here</div>
@@ -78,16 +97,23 @@
                         <input type="file" id="fileInput" accept=".dxf" style="display: none;">
                     </div>
 
-                    <div id="fileInfo" style="display: none;" class="file-info">
-                        <div class="file-info-icon">📄</div>
-                        <div class="file-info-details">
-                            <div class="file-info-name" id="fileName"></div>
-                            <div class="file-info-size" id="fileSize"></div>
+                    <!-- File loaded card (shown when file is loaded) -->
+                    <div id="fileLoadedCard" style="display: none;">
+                        <div class="file-info">
+                            <div class="file-info-icon">📄</div>
+                            <div class="file-info-details">
+                                <div class="file-info-name" id="fileName"></div>
+                                <div class="file-info-size" id="fileSize"></div>
+                            </div>
+                        </div>
+                        <!-- Status message (for Onshape imports) -->
+                        <div id="statusMessage" style="display: none;"></div>
+
+                        <!-- Upload different file option -->
+                        <div class="upload-different" id="uploadDifferent">
+                            <a href="#" id="uploadDifferentLink">Upload a different file</a>
                         </div>
                     </div>
-
-                    <!-- Status message for Onshape imports -->
-                    <div id="statusMessage" style="display: none; margin-top: 1rem; padding: 0.75rem; border-radius: 6px; font-size: 0.9rem;"></div>
                 </div>
 
                 <!-- Step 2: Parameters -->
@@ -98,17 +124,40 @@
                     </div>
 
                     <form id="paramForm">
+                        {% if machines|length > 1 %}
+                        <div class="param-group">
+                            <label>
+                                Machine
+                                <span class="label-hint">Select which machine to use</span>
+                            </label>
+                            <select id="machineId" required>
+                                {% for machine_id, machine_info in machines.items() %}
+                                <option value="{{ machine_id }}"
+                                        {% if machine_id == current_machine_id %}selected{% endif %}>
+                                    {{ machine_info.name }}
+                                </option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        {% endif %}
+
                         <div class="param-group">
                             <label>
                                 Material Type
                                 <span class="label-hint">Cutting parameters preset</span>
                             </label>
                             <select id="material" required>
-                                <option value="polycarb">Polycarb Plate</option>
-                                <option value="plywood">Plywood Plate</option>
-                                <option value="aluminum">Aluminum Plate</option>
-                                <option value="aluminum_tube">Aluminum Tube</option>
+                                {% for material_id, material_info in materials.items() %}
+                                <option value="{{ material_id }}"
+                                        {% if material_id == 'plywood' %}selected{% endif %}
+                                        {% if material_id in incomplete_materials %}data-incomplete="true"{% endif %}>
+                                    {{ material_info.name }}
+                                </option>
+                                {% endfor %}
                             </select>
+                            <div id="materialWarning" class="warning-message" style="display: none;">
+                                ⚠️ This material has incomplete settings in your config. Using plywood defaults for missing parameters.
+                            </div>
                         </div>
 
                         <div class="param-group">
@@ -140,14 +189,14 @@
                             <div class="param-group">
                                 <label style="display: flex; align-items: center; gap: 0.5rem;">
                                     <input type="checkbox" id="squareEnd" checked>
-                                    <span>Square the end</span>
+                                    <span>Square the zero end</span>
                                 </label>
                             </div>
 
                             <div class="param-group">
                                 <label style="display: flex; align-items: center; gap: 0.5rem;">
                                     <input type="checkbox" id="cutToLength" checked>
-                                    <span>Machine tube to length</span>
+                                    <span>Machine far end to length</span>
                                 </label>
                             </div>
                         </div>
@@ -160,7 +209,7 @@
                                 Tool Diameter (inches)
                                 <span class="label-hint">4mm = 0.157"</span>
                             </label>
-                            <input type="number" id="toolDiameter" step="0.001" value="0.157" min="0.01" required>
+                            <input type="number" id="toolDiameter" step="0.001" value="{{ default_tool_diameter }}" min="0.01" required>
                         </div>
                     </form>
                 </div>
@@ -179,6 +228,11 @@
                     <div class="loading" id="loading">
                         <div class="spinner"></div>
                         <div>Processing your file...</div>
+                    </div>
+
+                    <div class="alert info" id="configInfoAlert" style="display: none;">
+                        <div class="alert-title">ℹ️ Using Default Configuration</div>
+                        <div>No team-specific PenguinCAM-config.yaml found. Using default settings (24"x24" machine). To customize for your CNC, add a PenguinCAM-config.yaml file to your Onshape documents.</div>
                     </div>
 
                     <div class="alert error" id="errorAlert">
@@ -251,8 +305,8 @@
                     <!-- Toolpath Scrubber -->
                     <div class="scrubber-container" id="scrubberContainer" style="display: none;">
                         <div class="scrubber-header">
-                            <span id="scrubberLabel">Move 1 of 1</span>
-                            <span id="scrubberOperation" class="scrubber-operation">Ready</span>
+                            <div id="scrubberLabel">Move 1 of 1</div>
+                            <div id="scrubberOperation" class="scrubber-operation">Ready</div>
                         </div>
                         <input type="range" id="toolpathScrubber" class="toolpath-scrubber" min="0" max="100" value="0" step="1">
                     </div>
@@ -308,7 +362,14 @@
             errorMessage: '{{ error_message if error_message else "" }}',
             dxfFile: '{{ dxf_file if dxf_file else "" }}',
             fromOnshape: {{ 'true' if from_onshape else 'false' }},
-            suggestedFilename: '{{ suggested_filename if suggested_filename else "" }}'
+            suggestedFilename: '{{ suggested_filename if suggested_filename else "" }}',
+            usingDefaultConfig: {{ 'true' if using_default_config else 'false' }}
+        };
+
+        // Machine configuration for bounds checking
+        window.MACHINE_CONFIG = {
+            xMax: {{ machine_x_max if machine_x_max is defined else 48.0 }},
+            yMax: {{ machine_y_max if machine_y_max is defined else 96.0 }}
         };
     </script>
 

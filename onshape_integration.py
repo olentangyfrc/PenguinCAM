@@ -4,17 +4,35 @@ Handles OAuth authentication and DXF export from Onshape
 """
 
 import os
+import sys
 import json
 import requests
 import base64
 from urllib.parse import urlencode, parse_qs
 from datetime import datetime, timedelta
+from flask import session
+import logging
+
+# Configure logging for Vercel
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(message)s',
+    stream=sys.stderr,
+    force=True
+)
+logger = logging.getLogger(__name__)
+
+# Logging helper for Vercel/serverless environments
+def log(*args, **kwargs):
+    """Log to stderr using Python logging module for better Vercel compatibility"""
+    message = ' '.join(str(arg) for arg in args)
+    logger.info(message)
 
 class OnshapeClient:
     """Client for interacting with Onshape API"""
     
     BASE_URL = "https://cad.onshape.com"
-    API_BASE = "https://cad.onshape.com/api/v12"
+    API_BASE = "https://cad.onshape.com/api/v13"
     
     def __init__(self):
         self.config = self._load_config()
@@ -123,11 +141,11 @@ class OnshapeClient:
                 
                 return token_data
             else:
-                print(f"Token exchange failed: {response.status_code} - {response.text}")
+                log(f"Token exchange failed: {response.status_code} - {response.text}")
                 return None
                 
         except Exception as e:
-            print(f"Error exchanging code for token: {e}")
+            log(f"Error exchanging code for token: {e}")
             return None
     
     def refresh_access_token(self):
@@ -165,7 +183,7 @@ class OnshapeClient:
                 return False
                 
         except Exception as e:
-            print(f"Error refreshing token: {e}")
+            log(f"Error refreshing token: {e}")
             return False
     
     def _ensure_valid_token(self):
@@ -207,7 +225,7 @@ class OnshapeClient:
                 return response.json()
             return None
         except Exception as e:
-            print(f"Error getting user info: {e}")
+            log(f"Error getting user info: {e}")
             return None
 
     def get_user_session_info(self):
@@ -218,19 +236,19 @@ class OnshapeClient:
             dict with user session info including name, email, etc.
         """
         try:
-            print("   Fetching user session info...")
+            log("   Fetching user session info...")
             response = self._make_api_request('GET', '/users/sessioninfo')
             if response.status_code == 200:
                 user_info = response.json()
-                print(f"   ✅ User: {user_info.get('name', 'Unknown')}")
+                log(f"   ✅ User: {user_info.get('name', 'Unknown')}")
                 return user_info
             else:
-                print(f"   ❌ Failed to get session info: HTTP {response.status_code}")
+                log(f"   ❌ Failed to get session info: HTTP {response.status_code}")
                 return None
         except Exception as e:
-            print(f"   ❌ Error getting session info: {e}")
+            log(f"   ❌ Error getting session info: {e}")
             import traceback
-            traceback.print_exc()
+            log(traceback.format_exc())
             return None
 
     def get_companies(self):
@@ -241,19 +259,19 @@ class OnshapeClient:
             list of company dicts
         """
         try:
-            print("   Fetching companies...")
+            log("   Fetching companies...")
             response = self._make_api_request('GET', '/companies?activeOnly=true&includeAll=false')
             if response.status_code == 200:
                 companies = response.json().get('items', [])
-                print(f"   ✅ Found {len(companies)} companies: {[c.get('name') for c in companies]}")
+                log(f"   ✅ Found {len(companies)} companies: {[c.get('name') for c in companies]}")
                 return companies
             else:
-                print(f"   ❌ Failed to get companies: HTTP {response.status_code}")
+                log(f"   ❌ Failed to get companies: HTTP {response.status_code}")
                 return None
         except Exception as e:
-            print(f"   ❌ Error getting companies: {e}")
+            log(f"   ❌ Error getting companies: {e}")
             import traceback
-            traceback.print_exc()
+            log(traceback.format_exc())
             return None
 
     def get_document_company(self, document_id):
@@ -267,12 +285,12 @@ class OnshapeClient:
             dict with company info, or None if not found
         """
         try:
-            print("   Determining document owner company...")
+            log("   Determining document owner company...")
 
             # Get document info to find owner
             doc_info = self.get_document_info(document_id)
             if not doc_info:
-                print("   ❌ Could not get document info")
+                log("   ❌ Could not get document info")
                 return None
 
             # Documents have an 'owner' field with type and id
@@ -282,7 +300,7 @@ class OnshapeClient:
             owner_id = owner_info.get('id')
             owner_name = owner_info.get('name', 'Unknown')
 
-            print(f"   Document owner: {owner_name} (type={owner_type}, id={owner_id[:8]}...)")
+            log(f"   Document owner: {owner_name} (type={owner_type}, id={owner_id[:8]}...)")
 
             # If owner is a company/team (type 1 or 2), find it in the companies list
             if owner_type in [1, 2]:
@@ -290,18 +308,18 @@ class OnshapeClient:
                 if companies:
                     for company in companies:
                         if company.get('id') == owner_id:
-                            print(f"   ✅ Document belongs to company: {company.get('name')}")
+                            log(f"   ✅ Document belongs to company: {company.get('name')}")
                             return company
-                    print(f"   ⚠️  Document owner company not found in user's companies")
+                    log(f"   ⚠️  Document owner company not found in user's companies")
                     return None
             else:
-                print(f"   ℹ️  Document is owned by user (not a company/team)")
+                log(f"   ℹ️  Document is owned by user (not a company/team)")
                 return None
 
         except Exception as e:
-            print(f"   ❌ Error getting document company: {e}")
+            log(f"   ❌ Error getting document company: {e}")
             import traceback
-            traceback.print_exc()
+            log(traceback.format_exc())
             return None
     
     def _calculate_view_matrix(self, normal):
@@ -368,33 +386,33 @@ class OnshapeClient:
         Returns:
             DXF file content as bytes, or None if failed
         """
-        print(f"\n=== Attempting DXF export ===")
-        print(f"Document: {document_id}")
-        print(f"Workspace: {workspace_id}")
-        print(f"Element: {element_id}")
-        print(f"Face: {face_id}")
-        print(f"Body: {body_id}")
+        log(f"\n=== Attempting DXF export ===")
+        log(f"Document: {document_id}")
+        log(f"Workspace: {workspace_id}")
+        log(f"Element: {element_id}")
+        log(f"Face: {face_id}")
+        log(f"Body: {body_id}")
         if face_normal:
-            print(f"Normal: ({face_normal.get('x', 0):.3f}, {face_normal.get('y', 0):.3f}, {face_normal.get('z', 0):.3f})")
+            log(f"Normal: ({face_normal.get('x', 0):.3f}, {face_normal.get('y', 0):.3f}, {face_normal.get('z', 0):.3f})")
         
         # Try the internal export endpoint that Onshape's web UI uses
-        print("\n[Method 1] Trying exportinternal endpoint (web UI method)...")
+        log("\n[Method 1] Trying exportinternal endpoint (web UI method)...")
         endpoint = f"/documents/d/{document_id}/w/{workspace_id}/e/{element_id}/exportinternal"
         
         try:
             # For Part Studios, Onshape's "partIds" parameter actually expects face IDs, not body IDs
             # (Confusing naming by Onshape!)
             export_id = face_id  # Always use face_id for Part Studio exports
-            print(f"Using face_id for export: {export_id}")
+            log(f"Using face_id for export: {export_id}")
 
             # Calculate view matrix based on face normal (if provided)
             if face_normal:
                 view_matrix = self._calculate_view_matrix(face_normal)
-                print(f"Using calculated view matrix for normal ({face_normal.get('x', 0):.3f}, {face_normal.get('y', 0):.3f}, {face_normal.get('z', 0):.3f})")
+                log(f"Using calculated view matrix for normal ({face_normal.get('x', 0):.3f}, {face_normal.get('y', 0):.3f}, {face_normal.get('z', 0):.3f})")
             else:
                 # Default to top-down view
                 view_matrix = "1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1"
-                print("Using default top-down view matrix")
+                log("Using default top-down view matrix")
 
             body = {
                 "format": "DXF",
@@ -410,37 +428,37 @@ class OnshapeClient:
                 "partIds": export_id  # Must be a string, not an array!
             }
             
-            print(f"API endpoint: {self.API_BASE}{endpoint}")
-            print(f"Request body: {json.dumps(body, indent=2)}")
+            log(f"API endpoint: {self.API_BASE}{endpoint}")
+            log(f"Request body: {json.dumps(body, indent=2)}")
             
             response = self._make_api_request('POST', endpoint, json=body)
             
-            print(f"Response status: {response.status_code}")
-            print(f"Response headers: {dict(response.headers)}")
+            log(f"Response status: {response.status_code}")
+            log(f"Response headers: {dict(response.headers)}")
             
             if response.status_code == 200:
-                print(f"Success! DXF content length: {len(response.content)} bytes")
+                log(f"Success! DXF content length: {len(response.content)} bytes")
                 # Check if it's actually DXF content
                 content_preview = response.content[:100].decode('utf-8', errors='ignore')
-                print(f"Content preview: {content_preview[:50]}...")
+                log(f"Content preview: {content_preview[:50]}...")
                 return response.content
             else:
-                print(f"exportinternal failed: {response.status_code}")
-                print(f"Response: {response.text}")
+                log(f"exportinternal failed: {response.status_code}")
+                log(f"Response: {response.text}")
                 
         except Exception as e:
-            print(f"Error with exportinternal: {e}")
+            log(f"Error with exportinternal: {e}")
             import traceback
-            traceback.print_exc()
+            log(traceback.format_exc())
         
         # Fallback: Try async translations API
-        print("\n[Method 2] Trying async translations API...")
+        log("\n[Method 2] Trying async translations API...")
         result = self.export_dxf_async(document_id, workspace_id, element_id)
         if result:
             return result
         
         # Fallback: Try POST /export endpoint
-        print("\n[Method 3] Trying POST /export endpoint...")
+        log("\n[Method 3] Trying POST /export endpoint...")
         endpoint = f"/partstudios/d/{document_id}/w/{workspace_id}/e/{element_id}/export"
         
         try:
@@ -453,15 +471,15 @@ class OnshapeClient:
             response = self._make_api_request('POST', endpoint, json=body)
             
             if response.status_code == 200:
-                print(f"Success! DXF content length: {len(response.content)} bytes")
+                log(f"Success! DXF content length: {len(response.content)} bytes")
                 return response.content
             else:
-                print(f"POST export failed: {response.status_code}")
+                log(f"POST export failed: {response.status_code}")
                 
         except Exception as e:
-            print(f"Error with POST export: {e}")
+            log(f"Error with POST export: {e}")
         
-        print("\n=== All export methods failed ===")
+        log("\n=== All export methods failed ===")
         return None
     
     def _export_element_to_dxf(self, document_id, workspace_id, element_id):
@@ -469,20 +487,20 @@ class OnshapeClient:
         endpoint = f"/partstudios/d/{document_id}/w/{workspace_id}/e/{element_id}/dxf"
         
         try:
-            print(f"Exporting entire element as DXF...")
+            log(f"Exporting entire element as DXF...")
             response = self._make_api_request('GET', endpoint)
             
-            print(f"Response status: {response.status_code}")
+            log(f"Response status: {response.status_code}")
             
             if response.status_code == 200:
-                print(f"Success! DXF content length: {len(response.content)} bytes")
+                log(f"Success! DXF content length: {len(response.content)} bytes")
                 return response.content
             else:
-                print(f"Failed: {response.status_code} - {response.text}")
+                log(f"Failed: {response.status_code} - {response.text}")
                 return None
                 
         except Exception as e:
-            print(f"Error: {e}")
+            log(f"Error: {e}")
             return None
     
     def start_dxf_translation(self, document_id, workspace_id, element_id):
@@ -495,8 +513,8 @@ class OnshapeClient:
         endpoint = f"/partstudios/d/{document_id}/w/{workspace_id}/e/{element_id}/translations"
         
         try:
-            print(f"\nStarting DXF translation for element {element_id}")
-            print(f"API endpoint: {self.API_BASE}{endpoint}")
+            log(f"\nStarting DXF translation for element {element_id}")
+            log(f"API endpoint: {self.API_BASE}{endpoint}")
             
             body = {
                 "formatName": "DXF",
@@ -504,26 +522,26 @@ class OnshapeClient:
                 "flattenAssemblies": True
             }
             
-            print(f"Request body: {json.dumps(body, indent=2)}")
+            log(f"Request body: {json.dumps(body, indent=2)}")
             
             response = self._make_api_request('POST', endpoint, json=body)
             
-            print(f"Response status: {response.status_code}")
+            log(f"Response status: {response.status_code}")
             
             if response.status_code == 200:
                 data = response.json()
                 translation_id = data.get('id')
-                print(f"Translation started! ID: {translation_id}")
+                log(f"Translation started! ID: {translation_id}")
                 return translation_id
             else:
-                print(f"Failed to start translation: {response.status_code}")
-                print(f"Response: {response.text}")
+                log(f"Failed to start translation: {response.status_code}")
+                log(f"Response: {response.text}")
                 return None
                 
         except Exception as e:
-            print(f"Error starting translation: {e}")
+            log(f"Error starting translation: {e}")
             import traceback
-            traceback.print_exc()
+            log(traceback.format_exc())
             return None
     
     def check_translation_status(self, translation_id):
@@ -541,14 +559,14 @@ class OnshapeClient:
             if response.status_code == 200:
                 data = response.json()
                 state = data.get('requestState', 'UNKNOWN')
-                print(f"Translation {translation_id}: {state}")
+                log(f"Translation {translation_id}: {state}")
                 return data
             else:
-                print(f"Failed to check translation: {response.status_code}")
+                log(f"Failed to check translation: {response.status_code}")
                 return None
                 
         except Exception as e:
-            print(f"Error checking translation: {e}")
+            log(f"Error checking translation: {e}")
             return None
     
     def download_translation_result(self, document_id, translation_id, external_data_id):
@@ -564,19 +582,19 @@ class OnshapeClient:
         endpoint = f"/documents/d/{document_id}/externaldata/{external_data_id}"
         
         try:
-            print(f"Downloading translation result...")
+            log(f"Downloading translation result...")
             response = self._make_api_request('GET', endpoint)
             
             if response.status_code == 200:
-                print(f"Downloaded {len(response.content)} bytes")
+                log(f"Downloaded {len(response.content)} bytes")
                 return response.content
             else:
-                print(f"Failed to download: {response.status_code}")
-                print(f"Response: {response.text}")
+                log(f"Failed to download: {response.status_code}")
+                log(f"Response: {response.text}")
                 return None
                 
         except Exception as e:
-            print(f"Error downloading result: {e}")
+            log(f"Error downloading result: {e}")
             return None
     
     def export_dxf_async(self, document_id, workspace_id, element_id, timeout=60):
@@ -614,68 +632,113 @@ class OnshapeClient:
                         result_external_data_id[0]
                     )
                 else:
-                    print("Translation done but no result data ID found")
+                    log("Translation done but no result data ID found")
                     return None
                     
             elif state in ['FAILED', 'ACTIVE']:
-                print(f"Translation failed with state: {state}")
+                log(f"Translation failed with state: {state}")
                 failure_reason = status.get('failureReason', 'Unknown')
-                print(f"Failure reason: {failure_reason}")
+                log(f"Failure reason: {failure_reason}")
                 return None
             
             # Still processing, wait a bit
             time.sleep(2)
         
-        print(f"Translation timed out after {timeout} seconds")
+        log(f"Translation timed out after {timeout} seconds")
         return None
     
     def list_faces(self, document_id, workspace_id, element_id):
         """
         List all faces in a Part Studio element using bodydetails endpoint
-        
+
         Returns:
             Dict with bodies and their faces, or None if failed
         """
         endpoint = f"/partstudios/d/{document_id}/w/{workspace_id}/e/{element_id}/bodydetails"
-        
+
         try:
-            print(f"\nGetting body details for element {element_id}...")
-            print(f"API endpoint: {self.API_BASE}{endpoint}")
-            
+            log(f"\n{'='*70}")
+            log(f"ONSHAPE API: Getting body details")
+            log(f"{'='*70}")
+            log(f"Document ID: {document_id}")
+            log(f"Workspace ID: {workspace_id}")
+            log(f"Element ID: {element_id}")
+            log(f"Full endpoint: {self.API_BASE}{endpoint}")
+
             response = self._make_api_request('GET', endpoint)
-            
-            print(f"Response status: {response.status_code}")
-            
+
+            log(f"\n📡 Response status: {response.status_code}")
+            log(f"📡 Response headers: {dict(response.headers)}")
+
             if response.status_code == 200:
                 data = response.json()
-                
+
+                log(f"\n✅ API call succeeded")
+                log(f"Raw response keys: {list(data.keys())}")
+
                 # Parse bodies and faces
                 if 'bodies' in data:
-                    print(f"\nFound {len(data['bodies'])} bodies:")
+                    body_count = len(data['bodies'])
+                    log(f"\n📦 Found {body_count} bodies in element:")
+
+                    if body_count == 0:
+                        log("⚠️  WARNING: Element has ZERO bodies - this is unusual!")
+                        log("   This means the Part Studio is either empty or the API isn't returning body data")
 
                     for body in data['bodies']:
                         body_id = body.get('id', 'unknown')
                         body_name = body.get('properties', {}).get('name', 'Unnamed')
                         faces = body.get('faces', [])
-                        print(f"  Body {body_id} ({body_name}): {len(faces)} faces")
+                        face_count = len(faces)
 
-                        for i, face in enumerate(faces[:5]):  # Show first 5
-                            face_id = face.get('id', 'unknown')
-                            surface_type = face.get('surface', {}).get('type', 'unknown')
-                            print(f"    Face {face_id}: {surface_type}")
+                        log(f"\n  🔷 Body: {body_id}")
+                        log(f"     Name: {body_name}")
+                        log(f"     Faces: {face_count}")
 
-                        if len(faces) > 5:
-                            print(f"    ... and {len(faces) - 5} more faces")
-                
+                        if face_count == 0:
+                            log(f"     ⚠️  WARNING: Body has ZERO faces!")
+                        else:
+                            # Count face types
+                            face_types = {}
+                            for face in faces:
+                                surface_type = face.get('surface', {}).get('type', 'UNKNOWN')
+                                face_types[surface_type] = face_types.get(surface_type, 0) + 1
+
+                            log(f"     Face types: {face_types}")
+
+                            # Show first 5 faces with details
+                            for i, face in enumerate(faces[:5]):
+                                face_id = face.get('id', 'unknown')
+                                surface = face.get('surface', {})
+                                surface_type = surface.get('type', 'UNKNOWN')
+                                normal = surface.get('normal', {})
+                                area = face.get('area', 0)
+
+                                log(f"     Face {i+1}/{face_count}: ID={face_id}")
+                                log(f"       Type: {surface_type}")
+                                log(f"       Area: {area:.6f}")
+                                log(f"       Normal: ({normal.get('x', 0):.3f}, {normal.get('y', 0):.3f}, {normal.get('z', 0):.3f})")
+
+                            if len(faces) > 5:
+                                log(f"     ... and {len(faces) - 5} more faces")
+                else:
+                    log(f"⚠️  WARNING: Response has no 'bodies' key!")
+                    log(f"   Available keys: {list(data.keys())}")
+
+                log(f"{'='*70}\n")
                 return data
             else:
-                print(f"Failed: {response.status_code} - {response.text}")
+                log(f"\n❌ API call failed: HTTP {response.status_code}")
+                log(f"Response body: {response.text[:500]}")
+                log(f"{'='*70}\n")
                 return None
-                
+
         except Exception as e:
-            print(f"Error listing faces: {e}")
+            log(f"\n❌ Exception during list_faces:")
+            log(f"Error: {e}")
             import traceback
-            traceback.print_exc()
+            log(traceback.format_exc())
+            log(f"{'='*70}\n")
             return None
     
     def get_body_faces(self, document_id, workspace_id, element_id, body_id=None, cached_faces_data=None):
@@ -733,7 +796,7 @@ class OnshapeClient:
                 'name': body_name,
                 'faces': face_info
             }
-            print(f"Body {bid} ({body_name}): {len(face_info)} faces, largest area: {face_info[0]['area'] if face_info else 0}")
+            log(f"Body {bid} ({body_name}): {len(face_info)} faces, largest area: {face_info[0]['area'] if face_info else 0}")
         
         return result
     
@@ -751,51 +814,85 @@ class OnshapeClient:
         Returns:
             Tuple of (face_id, body_id, part_name, normal) or (None, None, None, None) if not found
         """
+        log(f"\n{'='*70}")
+        log(f"AUTO-SELECTING TOP FACE")
+        log(f"{'='*70}")
+        log(f"Document: {document_id}")
+        log(f"Workspace: {workspace_id}")
+        log(f"Element: {element_id}")
+        log(f"Requested body_id: {body_id if body_id else '(auto-detect)'}")
+        log(f"Using cached data: {cached_faces_data is not None}")
+
         faces_by_body = self.get_body_faces(document_id, workspace_id, element_id, body_id, cached_faces_data)
 
         if not faces_by_body:
+            log("❌ get_body_faces returned None - no bodies found")
+            log(f"{'='*70}\n")
             return None, None, None, None
 
         # Show available body IDs for debugging
         available_body_ids = list(faces_by_body.keys())
-        print(f"\n📋 Available body IDs in document: {available_body_ids}")
+        log(f"\n📋 Available body IDs in document: {available_body_ids}")
+        log(f"   Total bodies: {len(available_body_ids)}")
 
         # If body_id was specified, check if it matches
         if body_id:
             if body_id in faces_by_body:
-                print(f"✅ Filtering to selected body: {body_id} ({faces_by_body[body_id]['name']})")
+                log(f"✅ Filtering to selected body: {body_id} ({faces_by_body[body_id]['name']})")
             else:
-                print(f"⚠️  Requested body_id '{body_id}' not found in available bodies!")
-                print(f"   Available: {available_body_ids}")
-                print(f"   Will search all parts instead")
+                log(f"⚠️  Requested body_id '{body_id}' not found in available bodies!")
+                log(f"   Available: {available_body_ids}")
+                log(f"   Will search all parts instead")
 
         # Get all faces from all bodies (or just the selected body), tracking which body they belong to
         all_faces = []
         for bid, body_data in faces_by_body.items():
             part_name = body_data['name']
-            for face in body_data['faces']:
+            face_list = body_data['faces']
+            log(f"\n   Processing body {bid} ({part_name}): {len(face_list)} faces")
+
+            for face in face_list:
                 face['body_id'] = bid  # The actual body ID from the loop
                 face['part_name'] = part_name
                 all_faces.append(face)
 
+        log(f"\n📊 Total faces across all bodies: {len(all_faces)}")
+
+        # Count face types
+        face_type_counts = {}
+        for face in all_faces:
+            surface_type = face.get('surfaceType', 'UNKNOWN')
+            face_type_counts[surface_type] = face_type_counts.get(surface_type, 0) + 1
+
+        log(f"📊 Face type distribution: {face_type_counts}")
+
         # Filter for PLANE faces (any orientation)
+        log(f"\n🔍 Filtering for PLANE faces...")
         plane_faces = []
         for face in all_faces:
-            if face['surfaceType'] != 'PLANE':
+            surface_type = face.get('surfaceType', 'UNKNOWN')
+
+            if surface_type != 'PLANE':
                 continue
 
+            normal = face.get('normal', {})
             plane_faces.append({
                 'face_id': face['id'],
                 'area': face['area'],
                 'part_name': face['part_name'],
                 'body_id': face['body_id'],
-                'normal': face.get('normal', {})
+                'normal': normal
             })
 
-            print(f"  Found planar face: {face['id']} ({face['part_name']}), area={face['area']:.6f}")
+            log(f"   ✓ Found planar face: {face['id'][:8]}... ({face['part_name']})")
+            log(f"      Area: {face['area']:.6f}")
+            log(f"      Normal: ({normal.get('x', 0):.3f}, {normal.get('y', 0):.3f}, {normal.get('z', 0):.3f})")
+
+        log(f"\n📊 Total planar faces found: {len(plane_faces)}")
 
         if not plane_faces:
-            print("No planar faces found")
+            log("❌ No planar faces found in any body")
+            log(f"{'='*70}\n")
             return None, None, None, None
 
         # Select the face with the largest area
@@ -807,7 +904,13 @@ class OnshapeClient:
         ny = normal.get('y', 0)
         nz = normal.get('z', 1)
 
-        print(f"\n✅ Auto-selected face: {selected_face['face_id']} from part '{selected_face['part_name']}' (body: {selected_face['body_id']}), area={selected_face['area']:.6f}, normal=({nx:.3f}, {ny:.3f}, {nz:.3f})")
+        log(f"\n✅ AUTO-SELECTED FACE:")
+        log(f"   Face ID: {selected_face['face_id']}")
+        log(f"   Part: {selected_face['part_name']}")
+        log(f"   Body: {selected_face['body_id']}")
+        log(f"   Area: {selected_face['area']:.6f}")
+        log(f"   Normal: ({nx:.3f}, {ny:.3f}, {nz:.3f})")
+        log(f"{'='*70}\n")
 
         return selected_face['face_id'], selected_face['body_id'], selected_face['part_name'], selected_face['normal']
     
@@ -815,18 +918,18 @@ class OnshapeClient:
         """Get information about a document"""
         try:
             endpoint = f'/documents/{document_id}'
-            print(f"   Calling: {self.API_BASE}{endpoint}")
+            log(f"   Calling: {self.API_BASE}{endpoint}")
             response = self._make_api_request('GET', endpoint)
             if response.status_code == 200:
                 return response.json()
             else:
-                print(f"Failed to get document info: HTTP {response.status_code}")
-                print(f"Response: {response.text[:200]}")
+                log(f"Failed to get document info: HTTP {response.status_code}")
+                log(f"Response: {response.text[:200]}")
                 return None
         except Exception as e:
-            print(f"Error getting document info: {e}")
+            log(f"Error getting document info: {e}")
             import traceback
-            traceback.print_exc()
+            log(traceback.format_exc())
             return None
     
     def get_element_info(self, document_id, workspace_id, element_id):
@@ -839,52 +942,145 @@ class OnshapeClient:
             )
             if response.status_code == 200:
                 elements = response.json()
-                print(f"   Found {len(elements)} elements in document")
+                log(f"   Found {len(elements)} elements in document")
                 # Find the matching element
                 for element in elements:
                     if element.get('id') == element_id:
                         return element
-                print(f"   Element {element_id} not found in {len(elements)} elements")
+                log(f"   Element {element_id} not found in {len(elements)} elements")
                 return None
             else:
-                print(f"Failed to get elements: HTTP {response.status_code}")
-                print(f"Response: {response.text[:200]}")
+                log(f"Failed to get elements: HTTP {response.status_code}")
+                log(f"Response: {response.text[:200]}")
                 return None
         except Exception as e:
-            print(f"Error getting element info: {e}")
+            log(f"Error getting element info: {e}")
             import traceback
-            traceback.print_exc()
+            log(traceback.format_exc())
+            return None
+
+    def get_user_session_info(self):
+        """
+        Get detailed session info for the authenticated user
+
+        Returns:
+            dict with user session info including name, email, etc.
+        """
+        try:
+            log("   Fetching user session info...")
+            response = self._make_api_request('GET', '/users/sessioninfo')
+            if response.status_code == 200:
+                user_info = response.json()
+                log(f"   ✅ User: {user_info.get('name', 'Unknown')}")
+                return user_info
+            else:
+                log(f"   ❌ Failed to get session info: HTTP {response.status_code}")
+                return None
+        except Exception as e:
+            log(f"   ❌ Error getting session info: {e}")
+            import traceback
+            log(traceback.format_exc())
+            return None
+
+    def get_companies(self):
+        """
+        Get list of companies/teams the user belongs to
+
+        Returns:
+            list of company dicts
+        """
+        try:
+            log("   Fetching companies...")
+            response = self._make_api_request('GET', '/companies?activeOnly=true&includeAll=false')
+            if response.status_code == 200:
+                companies = response.json().get('items', [])
+                log(f"   ✅ Found {len(companies)} companies: {[c.get('name') for c in companies]}")
+                return companies
+            else:
+                log(f"   ❌ Failed to get companies: HTTP {response.status_code}")
+                return None
+        except Exception as e:
+            log(f"   ❌ Error getting companies: {e}")
+            import traceback
+            log(traceback.format_exc())
+            return None
+
+    def get_document_company(self, document_id):
+        """
+        Get the company/team that owns a specific document
+
+        Args:
+            document_id: Onshape document ID
+
+        Returns:
+            dict with company info, or None if not found
+        """
+        try:
+            log("   Determining document owner company...")
+
+            # Get document info to find owner
+            doc_info = self.get_document_info(document_id)
+            if not doc_info:
+                log("   ❌ Could not get document info")
+                return None
+
+            # Documents have an 'owner' field with type and id
+            # type: 0 = user, 1 = company, 2 = team
+            owner_info = doc_info.get('owner', {})
+            owner_type = owner_info.get('type')
+            owner_id = owner_info.get('id')
+            owner_name = owner_info.get('name', 'Unknown')
+
+            log(f"   Document owner: {owner_name} (type={owner_type}, id={owner_id[:8]}...)")
+
+            # If owner is a company/team (type 1 or 2), find it in the companies list
+            if owner_type in [1, 2]:
+                companies = self.get_companies()
+                if companies:
+                    for company in companies:
+                        if company.get('id') == owner_id:
+                            log(f"   ✅ Document belongs to company: {company.get('name')}")
+                            return company
+                    log(f"   ⚠️  Document owner company not found in user's companies")
+                    return None
+            else:
+                log(f"   ℹ️  Document is owned by user (not a company/team)")
+                return None
+
+        except Exception as e:
+            log(f"   ❌ Error getting document company: {e}")
+            import traceback
+            log(traceback.format_exc())
             return None
 
     def fetch_config_file(self):
         """
-        Search for and fetch PenguinCAM-config.json from the user's documents.
+        Search for and fetch PenguinCAM-config.yaml from the user's documents.
 
         Returns:
-            dict with parsed JSON config, or None if not found or on error
+            str with raw YAML content, or None if not found or on error
         """
         try:
-            print("\n🔍 Searching for PenguinCAM-config.json...")
+            log("\n🔍 Searching for PenguinCAM-config.yaml...")
 
-            # Search for documents with the config filename
-            search_params = {
-                'q': 'PenguinCAM-config.json',
-                'filter': '0'  # 0 = all types
+            # Search for documents with the config filename (v13 API)
+            search_body = {
+                'rawQuery': 'PenguinCAM-config.yaml'
             }
-            response = self._make_api_request('GET', '/documents', params=search_params)
+            response = self._make_api_request('POST', '/documents/search', json=search_body)
 
             if response.status_code != 200:
-                print(f"   ❌ Document search failed: HTTP {response.status_code}")
-                print(f"   Response: {response.text[:200]}")
+                log(f"   ❌ Document search failed: HTTP {response.status_code}")
+                log(f"   Response: {response.text[:200]}")
                 return None
 
             search_results = response.json()
             items = search_results.get('items', [])
 
-            print(f"   Found {len(items)} matching document(s)")
+            log(f"   Found {len(items)} matching document(s)")
 
             if not items:
-                print("   ℹ️  No PenguinCAM-config.json found in documents")
+                log("   ℹ️  No PenguinCAM-config.yaml found in documents")
                 return None
 
             # Use the first matching document
@@ -892,70 +1088,76 @@ class OnshapeClient:
             doc_id = config_doc.get('id')
             doc_name = config_doc.get('name', 'unknown')
 
-            print(f"   ✅ Found config document: {doc_name} (ID: {doc_id[:8]}...)")
+            log(f"   ✅ Found config document: {doc_name} (ID: {doc_id[:8]}...)")
 
-            # Get document details to find the default workspace
-            doc_info = self.get_document_info(doc_id)
-            if not doc_info:
-                print("   ❌ Could not get document info")
-                return None
-
-            workspace_id = doc_info.get('defaultWorkspace', {}).get('id')
+            # Get workspace ID from search results (v13 includes defaultWorkspace)
+            workspace_id = config_doc.get('defaultWorkspace', {}).get('id')
             if not workspace_id:
-                print("   ❌ No default workspace found")
-                return None
+                log("   ⚠️  No defaultWorkspace in search results, fetching document info...")
+                # Fallback: fetch document info separately
+                doc_info = self.get_document_info(doc_id)
+                if not doc_info:
+                    log("   ❌ Could not get document info")
+                    return None
+                workspace_id = doc_info.get('defaultWorkspace', {}).get('id')
+                if not workspace_id:
+                    log("   ❌ No default workspace found")
+                    return None
 
-            print(f"   Using workspace: {workspace_id[:8]}...")
+            log(f"   Using workspace: {workspace_id[:8]}...")
 
-            # List elements to find the JSON file tab
+            # List elements to find the YAML file tab
             response = self._make_api_request(
                 'GET',
                 f'/documents/d/{doc_id}/w/{workspace_id}/elements'
             )
 
             if response.status_code != 200:
-                print(f"   ❌ Could not list elements: HTTP {response.status_code}")
+                log(f"   ❌ Could not list elements: HTTP {response.status_code}")
                 return None
 
             elements = response.json()
 
-            # Look for a Blob element (which is what JSON files are stored as)
-            json_element = None
+            # Look for a Blob element with exact filename match
+            config_element = None
             for elem in elements:
-                if elem.get('type') == 'Blob' and 'json' in elem.get('name', '').lower():
-                    json_element = elem
+                elem_name = elem.get('name', '')
+                # Match exact filename (case-insensitive)
+                if (elem.get('type') == 'Blob' and
+                    elem_name.lower() in ['penguincam-config.yaml', 'penguincam-config.yml']):
+                    config_element = elem
                     break
 
-            if not json_element:
-                print("   ❌ No JSON element found in document")
-                print(f"   Available elements: {[e.get('name') for e in elements]}")
+            if not config_element:
+                log("   ❌ No YAML element found in document")
+                log(f"   Available elements: {[e.get('name') for e in elements]}")
                 return None
 
-            element_id = json_element.get('id')
-            element_name = json_element.get('name')
+            element_id = config_element.get('id')
+            element_name = config_element.get('name')
 
-            print(f"   ✅ Found JSON element: {element_name} (ID: {element_id[:8]}...)")
+            log(f"   ✅ Found YAML element: {element_name} (ID: {element_id[:8]}...)")
 
-            # Download the blob content
+            # Download the blob content as text
             response = self._make_api_request(
                 'GET',
                 f'/blobelements/d/{doc_id}/w/{workspace_id}/e/{element_id}'
             )
 
             if response.status_code != 200:
-                print(f"   ❌ Could not download blob: HTTP {response.status_code}")
+                log(f"   ❌ Could not download blob: HTTP {response.status_code}")
                 return None
 
-            # Parse JSON content
-            config_json = response.json()
-            print(f"   ✅ Successfully fetched config file")
+            # Return raw text content
+            config_yaml = response.text
+            log(f"   ✅ Successfully fetched config file ({len(config_yaml)} bytes)")
 
-            return config_json
+            return config_yaml
 
         except Exception as e:
-            print(f"   ❌ Error fetching config file: {e}")
+            log(f"   ❌ Error fetching config file: {e}")
             import traceback
-            traceback.print_exc()
+            log(traceback.format_exc())
             return None
 
     def parse_onshape_url(self, url):
@@ -991,37 +1193,72 @@ class OnshapeClient:
             return result if len(result) == 3 else None
             
         except Exception as e:
-            print(f"Error parsing Onshape URL: {e}")
+            log(f"Error parsing Onshape URL: {e}")
             return None
 
 
 class OnshapeSessionManager:
-    """Manages Onshape OAuth sessions for users"""
-    
-    def __init__(self):
-        self.sessions = {}  # In-memory storage (use Redis/DB in production)
-    
+    """
+    Manages Onshape OAuth sessions using Flask session (encrypted cookies).
+
+    Serverless-compatible: Tokens are stored in encrypted session cookies,
+    not server memory. Works across multiple container instances.
+    """
+
     def create_session(self, user_id, client):
-        """Store Onshape client for a user session"""
-        self.sessions[user_id] = {
-            'client': client,
-            'created': datetime.now()
+        """
+        Store Onshape tokens in Flask session (not the entire client object).
+
+        Args:
+            user_id: User identifier (for logging/debugging)
+            client: OnshapeClient with valid tokens
+        """
+        # Store only the serializable token data in Flask session
+        session['onshape_tokens'] = {
+            'access_token': client.access_token,
+            'refresh_token': client.refresh_token,
+            'expires_at': client.token_expires.isoformat() if client.token_expires else None,
+            'created': datetime.now().isoformat()
         }
-    
+
     def get_client(self, user_id):
-        """Get Onshape client for a user"""
-        session = self.sessions.get(user_id)
-        if session:
-            return session['client']
-        return None
-    
+        """
+        Reconstruct OnshapeClient from Flask session tokens.
+
+        Args:
+            user_id: User identifier (unused - tokens come from session cookie)
+
+        Returns:
+            OnshapeClient with tokens restored, or None if not authenticated
+        """
+        tokens = session.get('onshape_tokens')
+        if not tokens:
+            return None
+
+        # Reconstruct client from stored tokens
+        client = OnshapeClient()
+        client.access_token = tokens.get('access_token')
+        client.refresh_token = tokens.get('refresh_token')
+
+        # Parse expiration timestamp
+        expires_str = tokens.get('expires_at')
+        if expires_str:
+            client.token_expires = datetime.fromisoformat(expires_str)
+
+        return client
+
     def clear_session(self, user_id):
-        """Remove user's Onshape session"""
-        if user_id in self.sessions:
-            del self.sessions[user_id]
+        """
+        Remove Onshape tokens from Flask session.
+
+        Args:
+            user_id: User identifier (unused - operates on session cookie)
+        """
+        if 'onshape_tokens' in session:
+            del session['onshape_tokens']
 
 
-# Global session manager
+# Global session manager (stateless - all state in Flask session cookies)
 session_manager = OnshapeSessionManager()
 
 

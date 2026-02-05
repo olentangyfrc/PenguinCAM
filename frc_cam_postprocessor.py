@@ -17,7 +17,6 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import List, Tuple, Optional, Dict, Any
-from zoneinfo import ZoneInfo
 
 # Third-party
 import ezdxf
@@ -25,6 +24,7 @@ import ezdxf
 # Local modules
 from shapely.geometry import Point, Polygon, LineString, MultiPolygon
 from shapely.ops import unary_union, linemerge
+from team_config import TeamConfig
 
 
 @dataclass
@@ -60,6 +60,7 @@ MATERIAL_PRESETS = {
         'ramp_angle': 20.0,       # Ramp angle in degrees
         'ramp_start_clearance': 0.150,  # Clearance above material to start ramping (inches)
         'stepover_percentage': 0.65,    # Radial stepover as fraction of tool diameter (65% for plywood)
+        'helix_radius_multiplier': 0.75, # Helix entry radius as fraction of tool radius
         'max_slotting_depth': 0.4,      # Maximum depth per pass for perimeter slotting (inches)
         'tab_width': 0.25,        # Tab width (inches)
         'tab_height': 0.15,        # Tab height (inches)
@@ -74,6 +75,7 @@ MATERIAL_PRESETS = {
         'ramp_angle': 4.0,        # Ramp angle in degrees
         'ramp_start_clearance': 0.050,  # Clearance above material to start ramping (inches)
         'stepover_percentage': 0.25,    # Radial stepover as fraction of tool diameter (25% conservative for aluminum)
+        'helix_radius_multiplier': 0.5,  # Helix entry radius as fraction of tool radius (conservative for aluminum)
         'max_slotting_depth': 0.2,      # Maximum depth per pass for perimeter slotting (inches)
         'tab_width': 0.25,        # Tab width (inches) - same as plywood
         'tab_height': 0.15,       # Tab height (inches) - same as plywood
@@ -88,6 +90,7 @@ MATERIAL_PRESETS = {
         'ramp_angle': 20.0,       # Same as plywood
         'ramp_start_clearance': 0.100,  # Clearance above material to start ramping (inches)
         'stepover_percentage': 0.55,    # Radial stepover as fraction of tool diameter (55% moderate for polycarbonate)
+        'helix_radius_multiplier': 0.75, # Helix entry radius as fraction of tool radius
         'max_slotting_depth': 0.25,     # Maximum depth per pass for perimeter slotting (inches)
         'tab_width': 0.25,        # Tab width (inches) - same as plywood
         'tab_height': 0.15,        # Tab height (inches) - same as plywood
@@ -97,7 +100,8 @@ MATERIAL_PRESETS = {
 
 
 class FRCPostProcessor:
-    def __init__(self, material_thickness: float, tool_diameter: float, units: str = "inch"):
+    def __init__(self, material_thickness: float, tool_diameter: float, units: str = "inch",
+                 config: Optional[TeamConfig] = None):
         """
         Initialize the post-processor
 
@@ -105,24 +109,35 @@ class FRCPostProcessor:
             material_thickness: Thickness of material in inches
             tool_diameter: Diameter of cutting tool in inches (e.g., 4mm = 0.157")
             units: "inch" or "mm"
+            config: Optional TeamConfig instance for team-specific settings.
+                   If not provided, uses Team 6238 defaults.
         """
+        # Use provided config or create default (Team 6238 defaults)
+        if config is None:
+            config = TeamConfig()
+        self.config = config
+
         self.material_thickness = material_thickness
         self.tool_diameter = tool_diameter
         self.tool_radius = tool_diameter / 2
         self.units = units
-        self.tolerance = 0.02  # Tolerance for hole detection (inches)
+
+        # Hole detection tolerance from config
+        self.tolerance = config.hole_detection_tolerance
 
         # Minimum hole diameter that can be milled (must be > tool diameter for chip evacuation)
         # Holes smaller than this are skipped
+        self.min_millable_hole = tool_diameter * config.min_millable_hole_multiplier
+
         self.min_millable_hole = tool_diameter * 1.2  # 20% larger than tool for chip clearance
 
         # Z-axis reference: Z=0 is at BOTTOM (sacrifice board surface)
         # This allows zeroing to the sacrifice board instead of material top
-        self.sacrifice_board_depth = 0.008  # How far to cut into sacrifice board (inches)
-        self.clearance_height = 0.5  # Clearance above material top for rapid moves (inches)
+        self.sacrifice_board_depth = config.sacrifice_board_depth  # How far to cut into sacrifice board (inches)
+        self.clearance_height = config.clearance_height  # Clearance above material top for rapid moves (inches)
 
         # Calculated Z positions (Z=0 at sacrifice board)
-        self.safe_height = 1.5  # Safe height for rapid moves (absolute, not relative to material)
+        self.safe_height = config.safe_height  # Safe height for rapid moves (absolute, not relative to material)
         self.retract_height = material_thickness + self.clearance_height  # Retract above material
         self.material_top = material_thickness  # Top surface of material
         self.cut_depth = -self.sacrifice_board_depth  # Cut slightly into sacrifice board
@@ -138,31 +153,49 @@ class FRCPostProcessor:
         self.ramp_start_clearance = 0.15 if units == "inch" else 3.8  # Clearance above material to start ramping
         self.stepover_percentage = 0.6  # Radial stepover as fraction of tool diameter (default 60%)
 
-        # Tab parameters
-        self.tab_width = 0.25  # Width of tabs (inches)
-        self.tab_height = 0.1  # How much material to leave in tab (inches) - per team standards
-        self.tab_spacing = 6.0  # Desired spacing between tabs (inches) - actual spacing may be closer to ensure minimum 3 tabs
+        # Tab parameters from config
+        self.tabs_enabled = config.tabs_enabled  # Whether tabs are enabled
+        self.tab_width = config.tab_width  # Width of tabs (inches)
+        self.tab_height = config.tab_height  # How much material to leave in tab (inches)
+        self.tab_spacing = config.tab_spacing  # Desired spacing between tabs (inches)
+
+        # Fixturing preferences from config
+        self.pause_before_perimeter = config.pause_before_perimeter  # Pause before perimeter for screw fixturing
 
         # Tube facing parameters
         self.tube_facing_offset = 0.0625  # Hole offset to align with faced surface at Y=+1/16" (inches)
 
+        # Tube facing operation constants from config
+        self.tube_facing_params = config.get_tube_facing_params()
+
+        # Machine-specific constants from config
+        self.machine_park_x = config.machine_park_x  # X position for machine park (machine coordinates)
+        self.machine_park_y = config.machine_park_y  # Y position for machine park (machine coordinates)
+
+        # Helix entry radius multiplier (applied to tool diameter)
+        # Overridden by material presets
+        self.helix_radius_multiplier = 0.75  # Default 75% of tool radius
+
         # Error tracking
         self.errors = []  # Collect validation errors during processing
 
-    def apply_material_preset(self, material: str):
+    def apply_material_preset(self, material: str, machine_id: Optional[str] = None):
         """
         Apply a material preset to set feeds, speeds, and ramp angles.
 
         Args:
-            material: Material name ('plywood', 'aluminum', 'polycarbonate')
+            material: Material name ('plywood', 'aluminum', 'polycarbonate', or custom)
+            machine_id: Optional machine ID for machine-specific settings
         """
-        if material not in MATERIAL_PRESETS:
-            print(f"Warning: Unknown material '{material}'. Available: {', '.join(MATERIAL_PRESETS.keys())}")
-            print("Using default plywood settings.")
-            material = 'plywood'
+        # Get material preset from config (merges user config with Team 6238 defaults)
+        preset = self.config.get_material_preset(material, machine_id)
 
-        preset = MATERIAL_PRESETS[material]
-        self.material_name = preset['name']  # Store material name for header
+        # Check if we got a valid preset (config returns empty dict for unknown materials)
+        if not preset:
+            print(f"Warning: Unknown material '{material}'. Using default plywood settings.")
+            preset = self.config.get_material_preset('plywood', machine_id)
+
+        self.material_name = preset.get('name', material.capitalize())  # Store material name for header
 
         # Preset values are defined in IPM - convert to mm/min if needed
         if self.units == 'mm':
@@ -194,8 +227,12 @@ class FRCPostProcessor:
             self.tab_width = preset['tab_width']
             self.tab_height = preset['tab_height']
 
-        print(f"\nApplied material preset: {preset['name']}")
-        print(f"  {preset['description']}")
+        # Helix entry radius multiplier
+        self.helix_radius_multiplier = preset['helix_radius_multiplier']
+
+        print(f"\nApplied material preset: {preset.get('name', material.capitalize())}")
+        if 'description' in preset:
+            print(f"  {preset['description']}")
         if self.units == 'mm':
             print(f"  Feed rate: {preset['feed_rate']} IPM ({self.feed_rate:.0f} mm/min)")
             print(f"  Ramp feed rate: {preset['ramp_feed_rate']} IPM ({self.ramp_feed_rate:.0f} mm/min)")
@@ -239,6 +276,48 @@ class FRCPostProcessor:
         print(f"  ❌ ERROR: {error_msg}")
         self.errors.append(error_msg)
 
+    def _generate_pause_and_park_gcode(self, title: str, instructions: List[str]) -> List[str]:
+        """
+        Generate G-code for a safe pause-and-restart sequence with operator instructions.
+
+        This standardized pause sequence:
+        1. Moves to safe Z height (machine coordinates)
+        2. Parks at machine park position
+        3. Turns off air blast and spindle
+        4. Displays operator instructions
+        5. Pauses program (M0) waiting for operator to press CYCLE START
+        6. Restarts spindle and air blast after CYCLE START
+        7. Dwells for spindle spin-up
+
+        Args:
+            title: Title for the pause section (e.g., "PAUSE FOR TUBE FLIP")
+            instructions: List of instruction lines to display to operator
+
+        Returns:
+            List of G-code lines for the complete pause-and-restart sequence
+        """
+        gcode = []
+        gcode.append('')
+        gcode.append(f'( === {title} === )')
+        gcode.append('G53 G0 Z0.  ; Move to machine Z0 - safe clearance')
+        gcode.append(f'G53 G0 X{self.machine_park_x} Y{self.machine_park_y}  ; Park at back of machine')
+        gcode.append('M9  ; Air blast off')
+        gcode.append('M5  ; Spindle off')
+        gcode.append('G4 P5.0  ; 5 second dwell')
+        gcode.append('')
+        gcode.append('( *** OPERATOR ACTION REQUIRED *** )')
+        for instruction in instructions:
+            gcode.append(f'( {instruction} )')
+        gcode.append('( Press CYCLE START to continue )')
+        gcode.append('M0  ; Program pause')
+        gcode.append('')
+        gcode.append('( === RESTART AFTER PAUSE === )')
+        gcode.append(f'S{self.spindle_speed} M3  ; Spindle on')
+        gcode.append('M7  ; Air blast on')
+        gcode.append('G4 P3.0  ; 3 second spindle spin-up')
+        gcode.append('')
+        return gcode
+
     def load_dxf(self, filename: str):
         """Load DXF file and extract geometry"""
         print(f"Loading {filename}...")
@@ -279,27 +358,42 @@ class FRCPostProcessor:
         arcs = list(msp.query('ARC'))
         splines = list(msp.query('SPLINE'))
 
-        if lines or arcs or splines:
-            print(f"Found {len(lines)} lines, {len(arcs)} arcs, {len(splines)} splines - attempting to form closed paths...")
-            closed_paths = self._chain_entities_to_paths(lines, arcs, splines)
+        # Also collect unclosed LWPOLYLINEs - they may be part of a perimeter that needs stitching
+        unclosed_lwpolylines = []
+        for entity in msp.query('LWPOLYLINE'):
+            if not entity.closed and len(list(entity.get_points('xy'))) > 1:
+                unclosed_lwpolylines.append(entity)
+
+        if lines or arcs or splines or unclosed_lwpolylines:
+            print(f"Found {len(lines)} lines, {len(arcs)} arcs, {len(splines)} splines, {len(unclosed_lwpolylines)} unclosed polylines - attempting to form closed paths...")
+            closed_paths = self._chain_entities_to_paths(lines, arcs, splines, unclosed_lwpolylines)
             self.polylines.extend(closed_paths)
 
         print(f"Found {len(self.circles)} circles and {len(self.polylines)} closed paths")
 
     def _chain_entities_to_paths(self, lines, arcs, splines):
         """
-        Chain individual LINE, ARC, and SPLINE entities into closed paths.
+        Chain individual LINE, ARC, SPLINE, and unclosed LWPOLYLINE entities into closed paths.
         This handles DXF exports from Onshape and other CAD programs that don't use polylines.
         """
+        if unclosed_polylines is None:
+            unclosed_polylines = []
+
         # First, try the graph-based approach for exact geometry
         print("  Attempting to connect segments into exact paths...")
-        exact_paths = self._connect_segments_graph_based(lines, arcs, splines)
+        exact_paths = self._connect_segments_graph_based(lines, arcs, splines, unclosed_polylines)
         if exact_paths:
             return exact_paths
 
         # Fallback: Convert all entities to linestrings and try merge
         print("  Falling back to linestring merge...")
         all_linestrings = []
+
+        # Add unclosed LWPOLYLINE entities
+        for lwpoly in unclosed_polylines:
+            points = [(p[0], p[1]) for p in lwpoly.get_points('xy')]
+            if len(points) >= 2:
+                all_linestrings.append(LineString(points))
 
         # Add LINE entities
         for line in lines:
@@ -384,6 +478,9 @@ class FRCPostProcessor:
         Build a connectivity graph and find closed cycles.
         This preserves exact geometry including curves.
         """
+        if unclosed_polylines is None:
+            unclosed_polylines = []
+
         # Build list of all segments with their endpoints
         segments = []
 
@@ -873,7 +970,29 @@ class FRCPostProcessor:
 
         # Find the largest polygon (perimeter)
         polygons.sort(key=lambda x: x[0].area, reverse=True)
-        self.perimeter = polygons[0][1]  # Get the original points
+        candidate_perimeter = polygons[0][1]  # Get the original points
+        candidate_poly = polygons[0][0]
+
+        # Validate that the perimeter is reasonable
+        # If we have holes, the perimeter should be significantly larger than the bounding box of holes
+        if hasattr(self, 'circles') and self.circles:
+            xs = [c['center'][0] for c in self.circles]
+            ys = [c['center'][1] for c in self.circles]
+            bbox_width = max(xs) - min(xs)
+            bbox_height = max(ys) - min(ys)
+            bbox_area = bbox_width * bbox_height
+
+            # If the candidate perimeter is < 10% of the bounding box area, it's probably not the real perimeter
+            perimeter_area = candidate_poly.area
+            if perimeter_area < 0.1 * bbox_area:
+                error_msg = f"Perimeter too small ({perimeter_area:.2f} sq in) compared to part bounding box ({bbox_area:.2f} sq in). DXF may be missing perimeter outline geometry."
+                print(f"\n❌ ERROR: {error_msg}")
+                self.errors.append(error_msg)
+                self.perimeter = None
+                self.pockets = []
+                return
+
+        self.perimeter = candidate_perimeter
         self.pockets = [p[1] for p in polygons[1:]]
 
         print(f"\nIdentified perimeter and {len(self.pockets)} pockets")
@@ -916,9 +1035,9 @@ class FRCPostProcessor:
                 'team': {'number': 0, 'name': 'FRC Team'}
             }
 
-        # Generate timestamp in Eastern time
-        eastern_time = datetime.datetime.now(ZoneInfo("America/Detroit"))
-        timestamp = eastern_time.strftime("%Y-%m-%d %H:%M")
+        # Generate timestamp in Pacific time
+        pacific_time = datetime.datetime.now(ZoneInfo("America/Los_Angeles"))
+        timestamp = pacific_time.strftime("%Y-%m-%d %H:%M")
 
         # Determine operations present
         operations = []
@@ -941,13 +1060,18 @@ class FRCPostProcessor:
         gcode.append("(PenguinCAM CNC Post-Processor)")
 
         if hasattr(self, 'user_name'):
-            gcode.append(f"(Generated by: {self.user_name} on {timestamp})")
+            gcode.append(f"(Generated by: {self.user_name} on {timestamp_display})")
         else:
-            gcode.append(f"(Generated on: {timestamp})")
+            gcode.append(f"(Generated on: {timestamp_display})")
         gcode.append("")
 
-        gcode.append(f"(Machine: {machine.get('name', 'CNC Router')})")
-        gcode.append(f"(Controller: {machine.get('controller', 'Generic')})")
+        # Sanitize machine name to avoid nested parentheses in G-code comments
+        machine_name = machine.get('name', 'CNC Router').replace('(', '[').replace(')', ']')
+        controller = machine.get('controller', 'Generic').replace('(', '[').replace(')', ']')
+
+        gcode.append(f"(Machine: {machine_name})")
+        gcode.append(f"(Controller: {controller})")
+        gcode.append(f"(Machine bounds: X={self.config.machine_x_max:.1f}\" Y={self.config.machine_y_max:.1f}\" Z={self.config.machine_z_max:.1f}\")")
         gcode.append(f"(Units: {'Inches' if self.units == 'inch' else 'Millimeters'} - {'G20' if self.units == 'inch' else 'G21'})")
         gcode.append("(Coordinate system: G54)")
         gcode.append("(Plane: G17 - XY)")
@@ -1035,7 +1159,23 @@ class FRCPostProcessor:
 
         # Perimeter with tabs
         if self.perimeter:
-            gcode.append("(===== PERIMETER WITH TABS =====)")
+            # Optional pause before perimeter for teams using screw fixturing
+            if self.pause_before_perimeter:
+                gcode.extend(self._generate_pause_and_park_gcode(
+                    'PAUSE FOR FIXTURING',
+                    [
+                        'Internal features complete',
+                        'Install screws through holes into sacrifice board',
+                        'Fixture part securely before perimeter cutting'
+                    ]
+                ))
+
+            # Generate perimeter header (tabs may or may not be present depending on config)
+            if self.tabs_enabled:
+                gcode.append("(===== PERIMETER WITH TABS =====)")
+            else:
+                gcode.append("(===== PERIMETER (NO TABS) =====)")
+
             gcode.extend(self._generate_perimeter_gcode(self.perimeter))
             gcode.append("")
 
@@ -1045,7 +1185,7 @@ class FRCPostProcessor:
         gcode.append("G53 G0 Z0.  ; Move to machine coordinate Z0 (safe clearance)")
         gcode.append("M9  ; Air blast off")
         gcode.append("M5  ; Spindle off")
-        gcode.append("(G53 G0 X0.5 Y-6  ; Move gantry to back of machine for easy access)")
+        gcode.append("G53 G0 X0.5 Y23.5  ; Move gantry to back of machine for easy access")
         gcode.append("M30  ; Program end")
         gcode.append("")
 
@@ -1069,9 +1209,9 @@ class FRCPostProcessor:
 
         # Generate filename with timestamp
         base_name = suggested_filename if suggested_filename else "output"
-        pacific_time = datetime.datetime.now(ZoneInfo("America/Los_Angeles"))
-        timestamp = pacific_time.strftime("%Y%m%d_%H%M%S")
-        filename = f"{base_name}_{timestamp}.nc"
+        # Format timestamp for filename: YYYYMMDD_HHMMSS
+        timestamp_for_file = timestamp.replace('-', '').replace(' ', '_').replace(':', '')
+        filename = f"{base_name}_{timestamp_for_file}.nc"
 
         # Return result
         return PostProcessorResult(
@@ -1415,11 +1555,8 @@ class FRCPostProcessor:
         entry_x = offset_poly.centroid.x
         entry_y = offset_poly.centroid.y
 
-        # Detect if pocket is circular
-        is_circular = self._is_pocket_circular(pocket_points)
-
         # Calculate helical entry parameters
-        helix_radius = self.tool_diameter * 0.75  # Small helix for entry
+        helix_radius = self.tool_radius * self.helix_radius_multiplier  # Helix radius from material preset
         ramp_start_height = self.material_top + self.ramp_start_clearance
         num_helical_passes, depth_per_pass = self._calculate_helical_passes(helix_radius, ramp_start_height=ramp_start_height)
 
@@ -1441,108 +1578,50 @@ class FRCPostProcessor:
         # Return to center after helix
         gcode.append(f"G1 X{entry_x:.4f} Y{entry_y:.4f} F{self.feed_rate}  ; Return to pocket center")
 
-        # Spiral outward from center to perimeter
-        # Calculate maximum distance from center to any perimeter point
-        max_radius = 0
-        for point in offset_points:
-            dist = self._distance_2d(point, (entry_x, entry_y))
-            max_radius = max(max_radius, dist)
-
-        # Calculate spiral passes (similar to hole clearing)
+        # Calculate stepover for pocket clearing
         stepover = self.tool_diameter * self.stepover_percentage
-        num_passes = max(1, int(math.ceil(max_radius / stepover)))
 
-        if is_circular:
-            # CIRCULAR POCKET: Use efficient Archimedean spiral
-            gcode.append(f"(Circular pocket detected - using Archimedean spiral clearing)")
+        # Always use contour-parallel clearing for reliable material removal
+        # (Previous circular spiral optimization left material in slot-shaped pockets)
+        gcode.append(f"(Pocket clearing - using contour-parallel stepover passes)")
 
-            # Calculate inscribed radius (minimum distance from center to any EDGE)
-            # This prevents circular spiral from cutting outside pocket sides
-            from shapely.geometry import LineString, Point
-            center_point = Point(entry_x, entry_y)
+        # Generate inward offsets from perimeter to center
+        current_offset_distance = -self.tool_radius  # Start from tool-compensated perimeter
+        contours = []
 
-            min_edge_distance = float('inf')
-            for i in range(len(offset_points)):
-                # Create line segment for each edge
-                p1 = offset_points[i]
-                p2 = offset_points[(i + 1) % len(offset_points)]
-                edge = LineString([p1, p2])
+        # Calculate how many offset passes we need
+        # Find the maximum inset we can do (when pocket becomes too small)
+        test_offset = current_offset_distance
+        while True:
+            test_offset -= stepover
+            test_poly = pocket_poly.buffer(test_offset)
+            if test_poly.is_empty or test_poly.area < 0.001:
+                break
+            if not hasattr(test_poly, 'exterior'):
+                break
+            contours.append(test_poly)
 
-                # Calculate perpendicular distance from center to this edge
-                edge_dist = center_point.distance(edge)
-                min_edge_distance = min(min_edge_distance, edge_dist)
+        gcode.append(f"(Contour-parallel clearing: {len(contours)} offset passes)")
 
-            # Use inscribed radius (not circumscribed radius to vertices!)
-            max_radius = min_edge_distance
+        # Cut contours from outside-in (perimeter to center)
+        for idx, contour_poly in enumerate(reversed(contours)):
+            if hasattr(contour_poly, 'exterior'):
+                contour_points = list(contour_poly.exterior.coords)[:-1]
 
-            # Archimedean spiral: r = b*θ where b = stepover/(2π)
-            spiral_constant = stepover / (2 * math.pi)
+                gcode.append(f"(Contour pass {idx + 1}/{len(contours)})")
 
-            # Calculate total angle needed to reach max_radius
-            if spiral_constant > 0:
-                total_angle = max_radius / spiral_constant
-            else:
-                total_angle = 0
+                # Move to start of contour
+                gcode.append(f"G1 X{contour_points[0][0]:.4f} Y{contour_points[0][1]:.4f} F{self.feed_rate}")
 
-            # Generate spiral points
-            angle_increment = math.radians(10)  # 10 degrees per segment
-            num_points = int(math.ceil(total_angle / angle_increment))
+                # Cut the contour
+                for point in contour_points[1:]:
+                    gcode.append(f"G1 X{point[0]:.4f} Y{point[1]:.4f} F{self.feed_rate}")
 
-            gcode.append(f"(Archimedean spiral: {num_points} points to radius {max_radius:.4f}\")")
+                # Close the contour
+                gcode.append(f"G1 X{contour_points[0][0]:.4f} Y{contour_points[0][1]:.4f} F{self.feed_rate}")
 
-            # Cut continuous spiral from center to max_radius
-            # Use positive angle for counter-clockwise spiral (climb milling on inside feature)
-            for i in range(num_points):
-                current_angle = i * angle_increment  # Positive for counter-clockwise
-                current_radius = spiral_constant * current_angle
-
-                # Convert polar coordinates to Cartesian
-                x = entry_x + current_radius * math.cos(current_angle)
-                y = entry_y + current_radius * math.sin(current_angle)
-
-                gcode.append(f"G1 X{x:.4f} Y{y:.4f} F{self.feed_rate}")
-
-        else:
-            # NON-CIRCULAR POCKET: Use contour-parallel offset clearing
-            gcode.append(f"(Non-circular pocket detected - using contour-parallel clearing)")
-
-            # Generate inward offsets from perimeter to center
-            current_offset_distance = -self.tool_radius  # Start from tool-compensated perimeter
-            contours = []
-
-            # Calculate how many offset passes we need
-            # Find the maximum inset we can do (when pocket becomes too small)
-            test_offset = current_offset_distance
-            while True:
-                test_offset -= stepover
-                test_poly = pocket_poly.buffer(test_offset)
-                if test_poly.is_empty or test_poly.area < 0.001:
-                    break
-                if not hasattr(test_poly, 'exterior'):
-                    break
-                contours.append(test_poly)
-
-            gcode.append(f"(Contour-parallel clearing: {len(contours)} offset passes)")
-
-            # Cut contours from outside-in (perimeter to center)
-            for idx, contour_poly in enumerate(reversed(contours)):
-                if hasattr(contour_poly, 'exterior'):
-                    contour_points = list(contour_poly.exterior.coords)[:-1]
-
-                    gcode.append(f"(Contour pass {idx + 1}/{len(contours)})")
-
-                    # Move to start of contour
-                    gcode.append(f"G1 X{contour_points[0][0]:.4f} Y{contour_points[0][1]:.4f} F{self.feed_rate}")
-
-                    # Cut the contour
-                    for point in contour_points[1:]:
-                        gcode.append(f"G1 X{point[0]:.4f} Y{point[1]:.4f} F{self.feed_rate}")
-
-                    # Close the contour
-                    gcode.append(f"G1 X{contour_points[0][0]:.4f} Y{contour_points[0][1]:.4f} F{self.feed_rate}")
-
-                    # Return to center between passes for safety
-                    gcode.append(f"G1 X{entry_x:.4f} Y{entry_y:.4f} F{self.feed_rate}")
+                # Return to center between passes for safety
+                gcode.append(f"G1 X{entry_x:.4f} Y{entry_y:.4f} F{self.feed_rate}")
 
         # Final pass - cut actual perimeter at exact size
         gcode.append(f"(Final pass: cut exact perimeter)")
@@ -1637,9 +1716,9 @@ class FRCPostProcessor:
             ramp_distance = ramp_depth / math.tan(math.radians(self.ramp_angle))
             gcode.append(f"(Ramp-in: {ramp_distance:.4f}\" at {self.ramp_angle} deg)")
 
-            # Calculate tab zones ONLY on final pass
+            # Calculate tab zones ONLY on final pass (if tabs are enabled)
             tab_zones = []  # List of (start_dist, end_dist) tuples
-            if is_final_pass:
+            if is_final_pass and self.tabs_enabled:
                 # We cut from ramp_distance to perimeter_length, so tabs should only be in that range
                 cutting_length = perimeter_length - ramp_distance
 
@@ -1656,6 +1735,8 @@ class FRCPostProcessor:
                     tab_zones.append((tab_start, tab_end))
 
                 gcode.append(f"(Tabs: {num_tabs} tabs - desired spacing: {self.tab_spacing:.2f}\", actual: {actual_tab_spacing:.2f}\" - width: {self.tab_width:.4f}\")")
+            elif is_final_pass and not self.tabs_enabled:
+                gcode.append(f"(Tabs disabled - perimeter will be cut through completely)")
 
             # Move to start
             start = offset_points[0]
@@ -1708,7 +1789,7 @@ class FRCPostProcessor:
 
                     if remaining_depth > 0.001:  # Only if significant depth remains
                         # Use small helical loop instead of straight plunge
-                        helix_radius = self.tool_diameter * 0.75  # Small radius, safe for any geometry
+                        helix_radius = self.tool_radius * self.helix_radius_multiplier  # Helix radius from material preset
                         helix_center_x = current_pos[0]
                         helix_center_y = current_pos[1]
 
@@ -1899,20 +1980,20 @@ class FRCPostProcessor:
 
                 gcode.append(f"(Tab {tab_order_idx + 1} removal - #{removal_num} in sequence)")
 
-                # Rapid to safe height (should already be there, but be safe)
-                gcode.append(f"G0 Z{self.safe_height:.4f}")
+                # Rapid to retract height (like moving between holes)
+                gcode.append(f"G0 Z{self.retract_height:.4f}")
 
                 # Rapid to position just before the tab (in the kerf)
                 gcode.append(f"G0 X{start_x:.4f} Y{start_y:.4f}  ; Move to tab start (in kerf)")
 
-                # Plunge to cut depth in empty kerf (safe - no material)
-                gcode.append(f"G1 Z{self.cut_depth:.4f} F{self.plunge_rate}  ; Plunge in kerf")
+                # Plunge to cut depth in empty kerf at approach rate (faster - no material)
+                gcode.append(f"G1 Z{self.cut_depth:.4f} F{self.approach_rate}  ; Plunge in kerf")
 
                 # Cut across the tab at contour feed rate
                 gcode.append(f"G1 X{end_x:.4f} Y{end_y:.4f} F{self.feed_rate}  ; Cut through tab")
 
                 # Retract after each tab
-                gcode.append(f"G0 Z{self.safe_height:.4f}  ; Retract")
+                gcode.append(f"G0 Z{self.retract_height:.4f}  ; Retract")
                 gcode.append("")
 
         return gcode
@@ -1967,18 +2048,18 @@ class FRCPostProcessor:
             - finishing_depth_per_pass: Depth per finishing pass
         """
         # Cutting parameters
-        total_depth = tube_height / 2 + 0.005  # Just over half the tube height (half + 5 thou)
+        total_depth = tube_height / 2 + self.tube_facing_params['depth_margin']  # Just over half the tube height
         wall_thickness = self.material_thickness  # Wall thickness of box tubing
 
-        # Roughing: respects flute length limit (0.3" max per pass)
+        # Roughing: respects flute length limit (max per pass from params)
         # 1" tube (0.505"): 2 passes, 2" tube (1.005"): 4 passes
-        max_roughing_depth = 0.3
+        max_roughing_depth = self.tube_facing_params['max_roughing_depth']
         num_roughing_passes = max(1, int(math.ceil(total_depth / max_roughing_depth)))
         roughing_depth_per_pass = total_depth / num_roughing_passes
 
-        # Finishing: light stepover allows deeper passes (0.51" max per pass)
+        # Finishing: light stepover allows deeper passes (max per pass from params)
         # 1" tube (0.505"): 1 pass, 2" tube (1.005"): 2 passes
-        max_finishing_depth = 0.51
+        max_finishing_depth = self.tube_facing_params['max_finishing_depth']
         num_finishing_passes = max(1, int(math.ceil(total_depth / max_finishing_depth)))
         finishing_depth_per_pass = total_depth / num_finishing_passes
 
@@ -2058,17 +2139,17 @@ class FRCPostProcessor:
 
         # Tool edge positions for each phase (these are the final face positions)
         if phase == 1:
-            # Phase 1: Roughing at +0.05", finishing at +0.0625"
-            roughing_tool_edge = 0.05
-            finishing_tool_edge = 0.0625
+            # Phase 1: Roughing and finishing positions from params
+            roughing_tool_edge = self.tube_facing_params['roughing_tool_edge_p1']
+            finishing_tool_edge = self.tube_facing_params['finishing_tool_edge_p1']
         else:
-            # Phase 2: Roughing at -0.0125", finishing at 0"
-            roughing_tool_edge = -0.0125
-            finishing_tool_edge = 0.0
+            # Phase 2: Roughing and finishing positions from params
+            roughing_tool_edge = self.tube_facing_params['roughing_tool_edge_p2']
+            finishing_tool_edge = self.tube_facing_params['finishing_tool_edge_p2']
 
         # Arc clearing parameters (needed to calculate roughing_y offset)
-        arc_advance = 0.04  # How far each arc advances in X
-        arc_radius = 0.05  # Arc radius
+        arc_advance = self.tube_facing_params['arc_advance']  # How far each arc advances in X
+        arc_radius = self.tube_facing_params['arc_radius']  # Arc radius
         half_advance = arc_advance / 2
         j_offset = math.sqrt(arc_radius**2 - half_advance**2)
 
@@ -2274,7 +2355,7 @@ class FRCPostProcessor:
         """
         return self._generate_parametric_tube_facing(tube_width, tube_height, phase)
 
-    def generate_tube_facing_gcode(self, tube_size: str = '1x1', suggested_filename: str = None) -> PostProcessorResult:
+    def generate_tube_facing_gcode(self, tube_size: str = '1x1', suggested_filename: str = None, timestamp: str = None) -> PostProcessorResult:
         """
         Generate G-code for tube facing operation with parameterized tube dimensions.
 
@@ -2323,13 +2404,15 @@ class FRCPostProcessor:
 
         gcode = []
 
-        # Generate timestamp in Pacific time
-        pacific_time = datetime.datetime.now(ZoneInfo("America/Los_Angeles"))
-        timestamp = pacific_time.strftime("%Y-%m-%d %H:%M")
+        # Use provided timestamp (from client's timezone) or generate one
+        if not timestamp:
+            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # Format for G-code header (just date and time, no seconds)
+        timestamp_display = timestamp[:16]  # YYYY-MM-DD HH:MM
 
         # === HEADER ===
         gcode.append('( PENGUINCAM TUBE FACING OPERATION )')
-        gcode.append(f'( Generated: {timestamp} )')
+        gcode.append(f'( Generated: {timestamp_display} )')
         gcode.append(f'( Tube size: {tube_size} )')
         gcode.append(f'( Tool: {self.tool_diameter:.3f}" end mill )')
         gcode.append('( )')
@@ -2375,28 +2458,17 @@ class FRCPostProcessor:
                 gcode.append(adjusted_line)
 
         # === PAUSE FOR FLIP ===
-        gcode.append('')
-        gcode.append('( === PAUSE FOR TUBE FLIP === )')
-        gcode.append('G53 G0 Z0.  ; Move to machine Z0 - safe clearance')
-        gcode.append('G53 G0 X0.5 Y23.5  ; Park at back of machine')
-        gcode.append('M9  ; Air blast off')
-        gcode.append('M5')
-        gcode.append('G4 P5.0')
-        gcode.append('')
-        gcode.append('( *** OPERATOR ACTION REQUIRED *** )')
-        gcode.append('( Flip tube 180 degrees end-for-end )')
-        gcode.append('( Re-clamp tube in jig )')
-        gcode.append('( Press CYCLE START to continue )')
-        gcode.append('M0')
-        gcode.append('')
+        gcode.extend(self._generate_pause_and_park_gcode(
+            'PAUSE FOR TUBE FLIP',
+            [
+                'Flip tube 180 degrees end-for-end',
+                'Re-clamp tube in jig'
+            ]
+        ))
 
         # === PHASE 2: FACE SECOND HALF ===
         gcode.append('( === PHASE 2: FACE SECOND HALF === )')
         gcode.append('( Face from Y=-0.250 to Y=-0.125 )')
-        gcode.append('')
-        gcode.append(f'S{self.spindle_speed} M3')
-        gcode.append('M7  ; Air blast on')
-        gcode.append('G4 P3.0')
         gcode.append('')
         gcode.append('G53 G0 Z0.  ; Move to machine Z0 - safe clearance')
         gcode.append('G0 X0 Y0  ; Rapid to work origin')
@@ -2424,9 +2496,9 @@ class FRCPostProcessor:
 
         # Generate filename with timestamp
         base_name = suggested_filename if suggested_filename else "tube_facing"
-        pacific_time = datetime.datetime.now(ZoneInfo("America/Los_Angeles"))
-        timestamp = pacific_time.strftime("%Y%m%d_%H%M%S")
-        filename = f"{base_name}_{timestamp}.nc"
+        # Format timestamp for filename: YYYYMMDD_HHMMSS
+        timestamp_for_file = timestamp.replace('-', '').replace(' ', '_').replace(':', '')
+        filename = f"{base_name}_{timestamp_for_file}.nc"
 
         # Return result
         return PostProcessorResult(
@@ -2465,7 +2537,7 @@ class FRCPostProcessor:
     def generate_tube_pattern_gcode(self, tube_height: float,
                                    square_end: bool, cut_to_length: bool,
                                    tube_width: float = None, tube_length: float = None,
-                                   suggested_filename: str = None) -> PostProcessorResult:
+                                   suggested_filename: str = None, timestamp: str = None) -> PostProcessorResult:
         """
         Generate G-code for machining DXF pattern on both faces of a tube.
 
@@ -2505,13 +2577,15 @@ class FRCPostProcessor:
 
         gcode = []
 
-        # Generate timestamp
-        pacific_time = datetime.datetime.now(ZoneInfo("America/Los_Angeles"))
-        timestamp = pacific_time.strftime("%Y-%m-%d %H:%M")
+        # Use provided timestamp (from client's timezone) or generate one
+        if not timestamp:
+            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # Format for G-code header (just date and time, no seconds)
+        timestamp_display = timestamp[:16]  # YYYY-MM-DD HH:MM
 
         # === HEADER ===
         gcode.append('( PENGUINCAM TUBE PATTERN OPERATION )')
-        gcode.append(f'( Generated: {timestamp} )')
+        gcode.append(f'( Generated: {timestamp_display} )')
         if hasattr(self, 'user_name') and self.user_name:
             gcode.append(f'( User: {self.user_name} )')
         gcode.append(f'( Tube height: {tube_height:.3f}" )')
@@ -2608,7 +2682,7 @@ class FRCPostProcessor:
         gcode.append('')
         gcode.append('( === PAUSE FOR TUBE FLIP === )')
         gcode.append('G53 G0 Z0.  ; Safe height')
-        gcode.append('G53 G0 X0.5 Y-6  ; Park at back')
+        gcode.append('G53 G0 X0.5 Y23.5  ; Park at back')
         gcode.append('M9  ; Air blast off')
         gcode.append('M5')
         gcode.append('G4 P5.0')
@@ -2622,10 +2696,6 @@ class FRCPostProcessor:
 
         # === PHASE 2: SECOND FACE (SQUARE + MACHINE PATTERN) ===
         gcode.append('( === PHASE 2: SECOND FACE === )')
-        gcode.append('')
-        gcode.append(f'S{self.spindle_speed} M3')
-        gcode.append('M7  ; Air blast on')
-        gcode.append('G4 P3.0')
         gcode.append('')
 
         # Square the end first (if requested)
@@ -2675,7 +2745,7 @@ class FRCPostProcessor:
         gcode.append('')
         gcode.append('( === PROGRAM END === )')
         gcode.append('G53 G0 Z0.')
-        gcode.append('G53 G0 X0.5 Y23.5')
+        gcode.append(f'G53 G0 X{self.machine_park_x} Y{self.machine_park_y}')
         gcode.append('M9  ; Air blast off')
         gcode.append('M5')
         gcode.append('G54  ; Reset to standard work coordinate system')
@@ -2690,9 +2760,9 @@ class FRCPostProcessor:
 
         # Generate filename with timestamp
         base_name = suggested_filename if suggested_filename else "tube_pattern"
-        pacific_time = datetime.datetime.now(ZoneInfo("America/Los_Angeles"))
-        timestamp = pacific_time.strftime("%Y%m%d_%H%M%S")
-        filename = f"{base_name}_{timestamp}.nc"
+        # Format timestamp for filename: YYYYMMDD_HHMMSS
+        timestamp_for_file = timestamp.replace('-', '').replace(' ', '_').replace(':', '')
+        filename = f"{base_name}_{timestamp_for_file}.nc"
 
         # Build operation notes based on configuration
         operation_notes = []
@@ -3142,9 +3212,8 @@ class FRCPostProcessor:
 
 
 def add_timestamp_to_filename(filename: str) -> str:
-    """Add Pacific time timestamp to filename before extension."""
-    pacific_time = datetime.datetime.now(ZoneInfo("America/Los_Angeles"))
-    timestamp = pacific_time.strftime("%Y%m%d_%H%M%S")
+    """Add timestamp to filename before extension."""
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     base_name = os.path.splitext(filename)[0]
     extension = os.path.splitext(filename)[1]
     return f"{base_name}_{timestamp}{extension}"
@@ -3171,8 +3240,7 @@ def main():
     parser.add_argument('--cut-to-length', action='store_true',
                        help='Machine tube to length after pattern (tube-pattern mode)')
     parser.add_argument('--material', type=str, default='plywood',
-                       choices=['plywood', 'aluminum', 'polycarbonate'],
-                       help='Material preset (default: plywood) - sets feeds, speeds, and ramp angles')
+                       help='Material preset (default: plywood). Built-in: plywood, aluminum, polycarbonate. Custom materials from config also supported.')
     parser.add_argument('--thickness', type=float, default=0.25,
                        help='Material thickness in inches (default: 0.25)')
     parser.add_argument('--tool-diameter', type=float, default=0.157,

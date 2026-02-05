@@ -19,10 +19,34 @@ import json
 import secrets
 import re
 import atexit
+import time
+import threading
 from datetime import datetime
-from zoneinfo import ZoneInfo
 from urllib.parse import urlencode
 import ezdxf
+import logging
+
+# Configure logging for Vercel
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(message)s',
+    stream=sys.stderr,
+    force=True
+)
+logger = logging.getLogger(__name__)
+
+# Disable Werkzeug's request logging (clutters Vercel logs)
+# Try multiple approaches since WSGI environment might be tricky
+logging.getLogger('werkzeug').disabled = True
+logging.getLogger('werkzeug').setLevel(logging.ERROR)  # Only show errors, not INFO
+werkzeug_logger = logging.getLogger('werkzeug')
+werkzeug_logger.handlers = []  # Remove all handlers
+
+# Logging helper for Vercel/serverless environments
+def log(*args, **kwargs):
+    """Log to stderr using Python logging module for better Vercel compatibility"""
+    message = ' '.join(str(arg) for arg in args)
+    logger.info(message)
 
 # Import Google Drive integration (optional - will work without it)
 try:
@@ -30,8 +54,8 @@ try:
     GOOGLE_DRIVE_AVAILABLE = True
 except ImportError:
     GOOGLE_DRIVE_AVAILABLE = False
-    print("⚠️  Google Drive integration not available (missing dependencies)")
-    print("   Install with: pip install google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client")
+    log("⚠️  Google Drive integration not available (missing dependencies)")
+    log("   Install with: pip install google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client")
 
 # Import authentication (optional - will work without it)
 try:
@@ -39,7 +63,7 @@ try:
     AUTH_AVAILABLE = True
 except ImportError:
     AUTH_AVAILABLE = False
-    print("⚠️  Authentication module not available")
+    log("⚠️  Authentication module not available")
 
 # Import Onshape integration (optional - will work without it)
 try:
@@ -47,13 +71,145 @@ try:
     ONSHAPE_AVAILABLE = True
 except ImportError:
     ONSHAPE_AVAILABLE = False
-    print("⚠️  Onshape integration not available")
+    log("⚠️  Onshape integration not available")
 
 # Import postprocessor directly (for API calls instead of subprocess)
 from frc_cam_postprocessor import FRCPostProcessor, PostProcessorResult
 
+# Import team config management
+from team_config import TeamConfig
+
+# ============================================================================
+# File Token Manager - Secure file access with random tokens
+# ============================================================================
+
+class FileTokenManager:
+    """
+    Manages secure token-based file access to prevent filename guessing attacks.
+    Maps random tokens to actual file paths and handles automatic cleanup.
+
+    For serverless (Vercel), tokens are stored in Flask session cookies to work
+    across different container instances.
+    """
+
+    def __init__(self):
+        # For backwards compatibility with non-serverless environments
+        self.tokens = {}  # token → {'filepath': ..., 'filename': ..., 'created': timestamp}
+        self.lock = threading.Lock()
+        self.use_session = os.environ.get('VERCEL') == '1'  # Use session storage on Vercel
+
+    def register_file(self, filepath, real_filename):
+        """
+        Register a file and return a secure random token.
+
+        Args:
+            filepath: Full path to the file on disk
+            real_filename: The original filename (for download headers)
+
+        Returns:
+            Random token string (safe for URLs)
+        """
+        token = secrets.token_urlsafe(32)
+        file_info = {
+            'filepath': filepath,
+            'filename': real_filename,
+            'created': time.time()
+        }
+
+        if self.use_session:
+            # Store in Flask session (cookie-based, works across serverless instances)
+            if 'file_tokens' not in session:
+                session['file_tokens'] = {}
+            session['file_tokens'][token] = file_info
+            session.modified = True  # Force session save
+        else:
+            # Store in memory (for non-serverless environments)
+            with self.lock:
+                self.tokens[token] = file_info
+
+        log(f"🔐 Registered file: {real_filename} → token {token[:16]}... ({'session' if self.use_session else 'memory'})")
+        return token
+
+    def get_file(self, token):
+        """
+        Get file info for a token.
+
+        Args:
+            token: The secure token
+
+        Returns:
+            Dict with 'filepath' and 'filename', or None if not found
+        """
+        if self.use_session:
+            # Retrieve from Flask session
+            file_tokens = session.get('file_tokens', {})
+            return file_tokens.get(token)
+        else:
+            # Retrieve from memory
+            with self.lock:
+                return self.tokens.get(token)
+
+    def cleanup_old_files(self, max_age_seconds=3600):
+        """
+        Remove files older than max_age_seconds (default 1 hour).
+        Deletes both the file on disk and the token mapping.
+
+        Args:
+            max_age_seconds: Maximum file age in seconds (default 3600 = 1 hour)
+        """
+        current_time = time.time()
+        with self.lock:
+            expired_tokens = []
+            for token, info in self.tokens.items():
+                age = current_time - info['created']
+                if age > max_age_seconds:
+                    expired_tokens.append(token)
+                    # Delete the file from disk
+                    try:
+                        if os.path.exists(info['filepath']):
+                            os.unlink(info['filepath'])
+                            log(f"🗑️  Cleaned up expired file ({age/60:.1f} min old): {info['filename']}")
+                    except Exception as e:
+                        log(f"⚠️  Failed to delete {info['filepath']}: {e}")
+
+            # Remove expired tokens from mapping
+            for token in expired_tokens:
+                del self.tokens[token]
+
+            if expired_tokens:
+                log(f"✅ Cleanup complete: removed {len(expired_tokens)} expired file(s)")
+
+def cleanup_worker():
+    """Background thread that periodically cleans up old files"""
+    while True:
+        time.sleep(600)  # Run every 10 minutes
+        try:
+            file_token_manager.cleanup_old_files(max_age_seconds=3600)  # 1 hour
+        except Exception as e:
+            log(f"⚠️  Error in cleanup worker: {e}")
+
+# Initialize file token manager
+file_token_manager = FileTokenManager()
+
+# Start background cleanup thread (only for traditional server deployments)
+# Serverless platforms (Vercel, AWS Lambda) auto-cleanup when containers terminate
+IS_SERVERLESS = os.environ.get('VERCEL') or os.environ.get('AWS_LAMBDA_FUNCTION_NAME')
+
+if IS_SERVERLESS:
+    log("✅ File token manager initialized (serverless mode - container auto-cleanup)")
+else:
+    cleanup_thread = threading.Thread(target=cleanup_worker, daemon=True)
+    cleanup_thread.start()
+    log("✅ File token manager initialized with auto-cleanup thread (1 hour expiry)")
+
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max file size
+
+# Disable Flask/Werkzeug request logging in production (Vercel)
+if os.environ.get('VERCEL'):
+    app.logger.disabled = True
+    log_werkzeug = logging.getLogger('werkzeug')
+    log_werkzeug.disabled = True
 
 # Trust proxy headers (Railway, nginx, etc.)
 # This tells Flask it's behind HTTPS even if internal requests are HTTP
@@ -64,11 +220,11 @@ app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 secret_key = os.environ.get('FLASK_SECRET_KEY')
 if secret_key:
     app.secret_key = secret_key
-    print("✅ Using persistent FLASK_SECRET_KEY from environment")
+    log("✅ Using persistent FLASK_SECRET_KEY from environment")
 elif not app.secret_key:
     app.secret_key = secrets.token_hex(32)
-    print("⚠️  WARNING: Using random secret key. Sessions will not persist across restarts.")
-    print("   Set FLASK_SECRET_KEY environment variable for persistent sessions.")
+    log("⚠️  WARNING: Using random secret key. Sessions will not persist across restarts.")
+    log("   Set FLASK_SECRET_KEY environment variable for persistent sessions.")
 
 # Initialize authentication if available
 if AUTH_AVAILABLE:
@@ -92,10 +248,18 @@ limiter = Limiter(
     storage_uri="memory://",
     headers_enabled=True  # Send X-RateLimit headers in responses
 )
-print("✅ Rate limiting enabled (200 requests/hour default)")
+log("✅ Rate limiting enabled (200 requests/hour default)")
 
 # Directory for temporary files
-TEMP_DIR = tempfile.mkdtemp()
+# Serverless platforms (Vercel, Lambda) have /tmp as only writable location
+# Traditional servers get isolated temp directory
+if IS_SERVERLESS:
+    TEMP_DIR = '/tmp'
+    log("✅ Using /tmp for serverless environment")
+else:
+    TEMP_DIR = tempfile.mkdtemp()
+    log(f"✅ Created temp directory: {TEMP_DIR}")
+
 UPLOAD_FOLDER = os.path.join(TEMP_DIR, 'uploads')
 OUTPUT_FOLDER = os.path.join(TEMP_DIR, 'outputs')
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -148,7 +312,7 @@ def fetch_face_normal_and_body(client, document_id, workspace_id, element_id, fa
     Returns:
         tuple: (face_normal dict, auto_selected_body_id, part_name_from_body)
     """
-    print(f"Face ID provided: {face_id}, fetching face normal...")
+    log(f"Face ID provided: {face_id}, fetching face normal...")
 
     face_normal = None
     auto_selected_body_id = None
@@ -173,25 +337,20 @@ def fetch_face_normal_and_body(client, document_id, workspace_id, element_id, fa
                         if not body_id:
                             auto_selected_body_id = bid
 
-                        print(f"✅ Found face {face_id} in body {bid} ({part_name_from_body})")
-                        print(f"   Normal: ({face_normal.get('x', 0):.3f}, {face_normal.get('y', 0):.3f}, {face_normal.get('z', 0):.3f})")
+                        log(f"✅ Found face {face_id} in body {bid} ({part_name_from_body})")
+                        log(f"   Normal: ({face_normal.get('x', 0):.3f}, {face_normal.get('y', 0):.3f}, {face_normal.get('z', 0):.3f})")
                         break
                 if face_normal:
                     break
 
         if not face_normal:
-            print(f"⚠️  Warning: Could not find normal for face {face_id}, using default view")
+            log(f"⚠️  Warning: Could not find normal for face {face_id}, using default view")
 
     except Exception as e:
-        print(f"⚠️  Warning: Error fetching face normal: {e}")
-        print("   Continuing with default view matrix")
+        log(f"⚠️  Warning: Error fetching face normal: {e}")
+        log("   Continuing with default view matrix")
 
     return face_normal, auto_selected_body_id, part_name_from_body
-
-def generate_pacific_timestamp():
-    """Generate timestamp string in Pacific timezone"""
-    pacific_time = datetime.now(ZoneInfo("America/Los_Angeles"))
-    return pacific_time.strftime("%Y-%m-%d_%H-%M-%S")
 
 def generate_onshape_filename(doc_name, part_name):
     """
@@ -214,22 +373,90 @@ def generate_onshape_filename(doc_name, part_name):
         if part_clean and part_clean != 'Unnamed_Part':
             return part_clean
 
-    # Last resort: timestamp (Pacific time)
-    return f"Onshape_Part_{generate_pacific_timestamp()}"
+    # Last resort: timestamp (server's local time)
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    return f"Onshape_Part_{timestamp}"
 
 # ============================================================================
 # Routes
 # ============================================================================
 
 @app.route('/')
-@auth.require_auth
 def index():
     """Render the main GUI page"""
-    return render_template('index.html')
+    # ========================================================================
+    # AUTHENTICATION GATE: Require Onshape OAuth to access app
+    # ========================================================================
+    # This restricts access to authenticated Onshape users only, providing:
+    # - Natural security gate (no anonymous internet users)
+    # - Known user/team identity for configs and tracking
+    # - Better protection from abuse and cost control
+    #
+    # TO MAKE APP WIDE OPEN (allow anonymous browser access):
+    # Simply comment out or remove the code block below (lines until "End gate")
+    # ========================================================================
+    if ONSHAPE_AVAILABLE:
+        user_id = get_current_user_id()
+        client = session_manager.get_client(user_id)
+        if not client:
+            # No Onshape session - redirect to OAuth
+            log("⛔ Access denied: No Onshape authentication, redirecting to /onshape/auth")
+            return redirect('/onshape/auth')
+    # ========================================================================
+    # End authentication gate
+    # ========================================================================
+
+    # Get user/team info from session (if coming from Onshape)
+    user_name = session.get('user_name')
+    team_name = session.get('team_name')
+
+    # Reconstruct TeamConfig
+    team_config_data = session.get('team_config_data', {})
+    team_config = TeamConfig(team_config_data)
+
+    # Get available machines
+    machines = team_config.get_available_machines()
+
+    # Get current machine (from session, or use default)
+    current_machine_id = session.get('machine_id', team_config.default_machine_id)
+
+    # Get machine-specific config dict
+    team_config_dict = team_config.to_dict(current_machine_id)
+    drive_enabled = team_config_dict.get('google_drive_enabled', False)
+    default_tool_diameter = team_config_dict.get('default_tool_diameter', 0.157)
+    machine_x_max = team_config_dict.get('machine_x_max', 48.0)
+    machine_y_max = team_config_dict.get('machine_y_max', 96.0)
+
+    # Get available materials for current machine
+    available_materials = team_config.get_available_materials(current_machine_id)
+
+    # Add 'aluminum_tube' as a special UI-only material (uses aluminum preset)
+    available_materials['aluminum_tube'] = {
+        **available_materials.get('aluminum', {}),
+        'name': 'Aluminum Tube'
+    }
+
+    # Check for incomplete materials (custom materials missing required params)
+    incomplete_materials = {
+        material_id for material_id in available_materials.keys()
+        if not team_config.is_material_complete(material_id, current_machine_id) and material_id != 'aluminum_tube'
+    }
+
+    return render_template('index.html',
+                         user_name=user_name,
+                         team_name=team_name,
+                         drive_enabled=drive_enabled,
+                         default_tool_diameter=default_tool_diameter,
+                         machine_x_max=machine_x_max,
+                         machine_y_max=machine_y_max,
+                         using_default_config=session.get('using_default_config', False),
+                         machines=machines,
+                         current_machine_id=current_machine_id,
+                         materials=available_materials,
+                         incomplete_materials=incomplete_materials)
 
 @app.route('/process', methods=['POST'])
 @limiter.limit("10 per minute")  # Strict limit - CPU intensive operation
-@auth.require_auth
 def process_file():
     """Process uploaded DXF file and generate G-code"""
     try:
@@ -247,21 +474,24 @@ def process_file():
         # Get parameters
         material = request.form.get('material', 'plywood')
         is_aluminum_tube = (material.lower() == 'aluminum_tube')
+        machine_id = request.form.get('machine_id', None)  # Optional machine selection
 
-        # Map UI material names to post-processor material names
-        material_mapping = {
-            'polycarb': 'polycarbonate',
-            'polycarbonate': 'polycarbonate',
-            'plywood': 'plywood',
-            'aluminum': 'aluminum',
-            'aluminum_tube': 'aluminum'  # Use aluminum presets for tube
-        }
-        material = material_mapping.get(material.lower(), 'plywood')
+        # Map special cases:
+        # - 'aluminum_tube' -> 'aluminum' (aluminum_tube is UI-only, uses aluminum preset)
+        # - 'polycarb' -> 'polycarbonate' (legacy compatibility)
+        # All other materials pass through as-is (including custom materials from config)
+        if material.lower() == 'aluminum_tube':
+            material = 'aluminum'
+        elif material.lower() == 'polycarb':
+            material = 'polycarbonate'
 
         tool_diameter = float(request.form.get('tool_diameter', 0.157))
         origin_corner = request.form.get('origin_corner', 'bottom-left')
         rotation = int(request.form.get('rotation', 0))
         suggested_filename = request.form.get('suggested_filename', '')
+
+        # Get timestamp from client (in user's local timezone)
+        timestamp_str = request.form.get('timestamp', '')
 
         # Material-specific parameters
         thickness = float(request.form.get('thickness', 0.25))  # Material/wall thickness (used by both modes)
@@ -314,25 +544,30 @@ def process_file():
                     if rotation in [90, 270]:
                         tube_width = dxf_height
                         tube_length = dxf_width
-                        print(f"📏 Detected tube dimensions (after {rotation}° rotation): {tube_width:.3f}\" x {tube_length:.3f}\"")
+                        log(f"📏 Detected tube dimensions (after {rotation}° rotation): {tube_width:.3f}\" x {tube_length:.3f}\"")
                     else:
                         tube_width = dxf_width
                         tube_length = dxf_height
-                        print(f"📏 Detected tube dimensions: {tube_width:.3f}\" x {tube_length:.3f}\"")
+                        log(f"📏 Detected tube dimensions: {tube_width:.3f}\" x {tube_length:.3f}\"")
             except Exception as e:
-                print(f"⚠️  Could not extract tube dimensions from DXF: {e}")
+                log(f"⚠️  Could not extract tube dimensions from DXF: {e}")
 
         # Generate suggested filename base (without extension or timestamp)
         if suggested_filename:
             # Use Onshape-derived name
             base_name = suggested_filename
-            print(f"📝 Using Onshape filename base: {base_name}")
+            log(f"📝 Using Onshape filename base: {base_name}")
         else:
             # Use DXF filename
             base_name = Path(file.filename).stem
-            print(f"📝 Using DXF filename base: {base_name}")
+            log(f"📝 Using DXF filename base: {base_name}")
 
-        print(f"🚀 Running post-processor API...")
+        log(f"🚀 Running post-processor API...")
+
+        # Get team config from session (if available)
+        config_data = session.get('team_config_data', {})
+        team_config = TeamConfig.from_dict(config_data)
+        log(f"📋 Using team config: {team_config}")
 
         # Call post-processor API based on mode
         try:
@@ -341,14 +576,15 @@ def process_file():
                 pp = FRCPostProcessor(
                     material_thickness=thickness,
                     tool_diameter=tool_diameter,
-                    units='inch'
+                    units='inch',
+                    config=team_config
                 )
 
                 # Store tube height for Z-offset calculations
                 pp.tube_height = tube_height
 
-                # Apply material preset
-                pp.apply_material_preset(material)
+                # Apply material preset (for specific machine if selected)
+                pp.apply_material_preset(material, machine_id)
 
                 # Add user name if authenticated
                 user_name = session.get('user_name')
@@ -368,18 +604,20 @@ def process_file():
                     cut_to_length=cut_to_length,
                     tube_width=tube_width,
                     tube_length=tube_length,
-                    suggested_filename=base_name
+                    suggested_filename=base_name,
+                    timestamp=timestamp_str
                 )
             else:
                 # Standard mode - use standard API
                 pp = FRCPostProcessor(
                     material_thickness=thickness,
                     tool_diameter=tool_diameter,
-                    units='inch'
+                    units='inch',
+                    config=team_config
                 )
 
-                # Apply material preset
-                pp.apply_material_preset(material)
+                # Apply material preset (for specific machine if selected)
+                pp.apply_material_preset(material, machine_id)
 
                 # Add user name if authenticated
                 user_name = session.get('user_name')
@@ -396,12 +634,12 @@ def process_file():
                 pp.identify_perimeter_and_pockets()
 
                 # Generate G-code using API
-                result = pp.generate_gcode(suggested_filename=base_name)
+                result = pp.generate_gcode(suggested_filename=base_name, timestamp=timestamp_str)
 
             if not result.success:
-                print(f"❌ Post-processor API failed!")
+                log(f"❌ Post-processor API failed!")
                 for error in result.errors:
-                    print(f"   Error: {error}")
+                    log(f"   Error: {error}")
                 return jsonify({
                     'error': 'Post-processor failed',
                     'details': '\n'.join(result.errors)
@@ -412,15 +650,16 @@ def process_file():
             with open(output_path, 'w') as f:
                 f.write(result.gcode)
 
-            print(f"✅ Output file created: {os.path.getsize(output_path)} bytes")
-            print(f"📄 Output file: {output_path}")
+            log(f"✅ Output file created: {os.path.getsize(output_path)} bytes")
+            log(f"📄 Output file: {output_path}")
 
-            # Get actual filename with timestamp for download/drive routes
+            # Register file with token manager for secure access
             actual_filename = result.filename
+            output_token = file_token_manager.register_file(output_path, actual_filename)
 
         except Exception as e:
-            print(f"❌ Post-processor API error: {e}")
-            traceback.print_exc()
+            log(f"❌ Post-processor API error: {e}")
+            log(traceback.format_exc())
             return jsonify({
                 'error': 'Post-processor API error',
                 'details': str(e)
@@ -455,7 +694,7 @@ def process_file():
 
         response_data = {
             'success': True,
-            'filename': actual_filename,  # Return actual filename with timestamp
+            'filename': output_token,  # Return secure token (not actual filename)
             'gcode': result.gcode,
             'console': console_output,
             'parameters': parameters
@@ -471,89 +710,147 @@ def process_file():
     except ValueError as e:
         return jsonify({'error': f'Invalid parameter value: {str(e)}'}), 400
     except Exception as e:
-        traceback.print_exc()
+        log(traceback.format_exc())
         return jsonify({'error': f'Unexpected error: {str(e)}'}), 500
 
-@app.route('/download/<filename>')
-@auth.require_auth
-def download_file(filename):
-    """Download generated G-code file"""
+@app.route('/download/<token>')
+@limiter.limit("30 per minute")
+def download_file(token):
+    """
+    Download generated G-code file using secure token.
+    Token prevents filename guessing attacks.
+    """
     try:
-        file_path = os.path.join(OUTPUT_FOLDER, filename)
+        # Look up file by token
+        file_info = file_token_manager.get_file(token)
+        if not file_info:
+            return jsonify({'error': 'File not found or expired'}), 404
+
+        file_path = file_info['filepath']
+        real_filename = file_info['filename']
+
+        # Verify file still exists on disk
         if not os.path.exists(file_path):
             return jsonify({'error': 'File not found'}), 404
-        
+
+        log(f"📥 Download request: token {token[:16]}... → {real_filename}")
+
         return send_file(
             file_path,
             as_attachment=True,
-            download_name=filename,
+            download_name=real_filename,  # User sees the real filename
             mimetype='text/plain'
         )
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-@app.route('/uploads/<filename>')
-def serve_upload(filename):
-    """Serve uploaded DXF files for frontend preview"""
+@app.route('/uploads/<token>')
+@limiter.limit("30 per minute")
+def serve_upload(token):
+    """
+    Serve uploaded DXF files for frontend preview using secure token.
+    Token prevents filename guessing attacks.
+    """
     try:
-        return send_from_directory(UPLOAD_FOLDER, filename)
+        # Look up file by token
+        file_info = file_token_manager.get_file(token)
+        if not file_info:
+            return jsonify({'error': 'File not found or expired'}), 404
+
+        file_path = file_info['filepath']
+
+        # Verify file still exists on disk
+        if not os.path.exists(file_path):
+            return jsonify({'error': 'File not found'}), 404
+
+        log(f"📂 Upload preview: token {token[:16]}... → {file_info['filename']}")
+
+        return send_file(file_path, mimetype='application/dxf')
     except Exception as e:
         return jsonify({'error': f'File not found: {str(e)}'}), 404
 
 @app.route('/drive/status')
-@auth.require_auth
+@limiter.limit("30 per minute")
 def drive_status():
     """Check if Google Drive integration is available and configured"""
     if not GOOGLE_DRIVE_AVAILABLE:
         return jsonify({
             'available': False,
+            'enabled': False,
             'message': 'Google Drive dependencies not installed'
         })
-    
-    # Check if user is authenticated and has Drive access
+
+    # Check team config to see if Drive is enabled
+    team_config = session.get('team_config', {})
+    drive_enabled = team_config.get('google_drive_enabled', False)
+    folder_id = team_config.get('google_drive_folder_id')
+
+    if not drive_enabled or not folder_id:
+        return jsonify({
+            'available': True,
+            'enabled': False,
+            'message': 'Google Drive not configured for your team. Add PenguinCAM-config.yaml to enable.'
+        })
+
+    # Check if user is authenticated with Google
     if AUTH_AVAILABLE and auth.is_enabled():
         creds = auth.get_credentials()
         if not creds:
             return jsonify({
                 'available': True,
-                'configured': False,
-                'message': 'Please log in to connect Google Drive'
+                'enabled': True,
+                'authenticated': False,
+                'message': 'Click "Save to Drive" to authenticate'
             })
-        
+
         return jsonify({
             'available': True,
-            'configured': True,
-            'message': 'Google Drive connected'
+            'enabled': True,
+            'authenticated': True,
+            'message': 'Google Drive ready',
+            'folder_id': folder_id
         })
     else:
-        # Auth disabled, Drive not available
         return jsonify({
             'available': True,
-            'configured': False,
-            'message': 'Google Drive not configured - see GOOGLE_DRIVE_SETUP.md'
+            'enabled': True,
+            'authenticated': False,
+            'message': 'Click "Save to Drive" to authenticate'
         })
 
-@app.route('/drive/upload/<filename>', methods=['POST'])
+@app.route('/drive/upload/<token>', methods=['POST'])
 @limiter.limit("30 per minute")  # Reasonable limit for uploads
 @auth.require_auth
-def upload_to_drive(filename):
-    """Upload a G-code file to Google Drive"""
-    print(f"📤 Drive upload requested for: {filename}")
-    
+def upload_to_drive(token):
+    """Upload a G-code file to Google Drive using secure token"""
+    log(f"📤 Drive upload requested for token: {token[:16]}...")
+
     if not GOOGLE_DRIVE_AVAILABLE:
-        print("❌ Google Drive integration not available")
+        log("❌ Google Drive integration not available")
         return jsonify({
             'success': False,
             'message': 'Google Drive integration not available'
         }), 400
-    
+
     try:
-        file_path = os.path.join(OUTPUT_FOLDER, filename)
-        print(f"📂 Looking for file at: {file_path}")
-        print(f"📂 File exists: {os.path.exists(file_path)}")
-        
+        # Look up file by token
+        file_info = file_token_manager.get_file(token)
+        if not file_info:
+            log(f"❌ Token not found or expired: {token[:16]}...")
+            return jsonify({
+                'success': False,
+                'message': 'File not found or expired'
+            }), 404
+
+        file_path = file_info['filepath']
+        real_filename = file_info['filename']
+
+        log(f"📂 Looking for file at: {file_path}")
+        log(f"📂 Real filename: {real_filename}")
+        log(f"📂 File exists: {os.path.exists(file_path)}")
+
         if not os.path.exists(file_path):
-            print(f"❌ File not found: {file_path}")
+            log(f"❌ File not found: {file_path}")
             return jsonify({
                 'success': False,
                 'message': 'File not found'
@@ -562,44 +859,44 @@ def upload_to_drive(filename):
         # Get credentials from session
         creds = None
         if AUTH_AVAILABLE and auth.is_enabled():
-            print("🔐 Getting credentials from session...")
+            log("🔐 Getting credentials from session...")
             creds = auth.get_credentials()
             if not creds:
-                print("❌ No credentials in session")
+                log("❌ No credentials in session")
                 return jsonify({
                     'success': False,
                     'message': 'Not authenticated with Google Drive'
                 }), 401
-            print(f"✅ Got credentials, scopes: {creds.scopes if hasattr(creds, 'scopes') else 'unknown'}")
+            log(f"✅ Got credentials, scopes: {creds.scopes if hasattr(creds, 'scopes') else 'unknown'}")
         
         # Create uploader with credentials
-        print("🔧 Creating GoogleDriveUploader...")
+        log("🔧 Creating GoogleDriveUploader...")
         uploader = GoogleDriveUploader(credentials=creds)
         
-        print("🔐 Authenticating...")
+        log("🔐 Authenticating...")
         if not uploader.authenticate():
-            print("❌ Authentication failed")
+            log("❌ Authentication failed")
             return jsonify({
                 'success': False,
                 'message': 'Failed to authenticate with Google Drive'
             }), 500
         
-        print("✅ Authenticated, uploading file...")
-        # Upload the file
-        result = uploader.upload_file(file_path, filename)
-        
-        print(f"📤 Upload result: {result}")
-        
+        log("✅ Authenticated, uploading file...")
+        # Upload the file with real filename
+        result = uploader.upload_file(file_path, real_filename)
+
+        log(f"📤 Upload result: {result}")
+
         if result and result.get('success'):
-            print(f"✅ Upload successful: {result.get('web_link')}")
+            log(f"✅ Upload successful: {result.get('web_link')}")
             return jsonify({
                 'success': True,
-                'message': f'✅ Uploaded: {filename}',
+                'message': f'✅ Uploaded: {real_filename}',
                 'file_id': result.get('file_id'),
                 'web_view_link': result.get('web_link')
             })
         else:
-            print(f"❌ Upload failed: {result.get('message') if result else 'Unknown error'}")
+            log(f"❌ Upload failed: {result.get('message') if result else 'Unknown error'}")
             return jsonify({
                 'success': False,
                 'message': result.get('message') if result else 'Upload failed'
@@ -616,7 +913,6 @@ def upload_to_drive(filename):
 # ============================================================================
 
 @app.route('/onshape/auth')
-@auth.require_auth
 def onshape_auth():
     """Start Onshape OAuth flow"""
     if not ONSHAPE_AVAILABLE:
@@ -674,6 +970,37 @@ def onshape_oauth_callback():
         session_manager.create_session(user_id, client)
         session['onshape_authenticated'] = True
 
+        # Fetch user info and team config for session
+        log("\n" + "="*60)
+        log("Fetching user and team config after OAuth")
+        log("="*60)
+
+        # Get user session info
+        user_session = client.get_user_session_info()
+        if user_session:
+            user_name = user_session.get('name')
+            user_email = user_session.get('email')
+            log(f"✅ User: {user_name} ({user_email})")
+            session['user_name'] = user_name
+            session['user_email'] = user_email
+
+        # Get team config file
+        config_yaml = client.fetch_config_file()
+        if config_yaml:
+            team_config = TeamConfig.from_yaml(config_yaml)
+            log(f"✅ Team config loaded: {team_config.team_name} (#{team_config.team_number})")
+            session['team_config_data'] = team_config._data
+            session['team_config'] = team_config.to_dict()
+            session['using_default_config'] = False
+        else:
+            log("⚠️  No team config found - using defaults")
+            team_config = TeamConfig()
+            session['team_config_data'] = {}
+            session['team_config'] = team_config.to_dict()
+            session['using_default_config'] = True
+
+        log("="*60 + "\n")
+
         # Clean up OAuth state
         session.pop('onshape_oauth_state', None)
 
@@ -692,7 +1019,7 @@ def onshape_oauth_callback():
         return f"OAuth callback error: {str(e)}", 500
 
 @app.route('/onshape/status')
-@auth.require_auth
+@limiter.limit("30 per minute")
 def onshape_status():
     """Check Onshape connection status"""
     if not ONSHAPE_AVAILABLE:
@@ -705,11 +1032,11 @@ def onshape_status():
     try:
         user_id = get_current_user_id()
         client = session_manager.get_client(user_id)
-        
+
         if client and client.access_token:
             # Try to get user info to verify connection
             user_info = client.get_user_info()
-            
+
             return jsonify({
                 'available': True,
                 'connected': True,
@@ -721,7 +1048,7 @@ def onshape_status():
                 'connected': False,
                 'message': 'Not connected to Onshape'
             })
-            
+
     except Exception as e:
         return jsonify({
             'available': True,
@@ -729,98 +1056,152 @@ def onshape_status():
             'message': f'Error: {str(e)}'
         })
 
-@app.route('/onshape/list-faces', methods=['GET'])
-@auth.require_auth
-def onshape_list_faces():
-    """
-    List all faces in a Part Studio element
-    For debugging and exploring the Onshape API
-    """
+@app.route('/download-config-template')
+@limiter.limit("30 per minute")
+def download_config_template():
+    """Download the PenguinCAM config template file"""
     try:
-        # Get parameters
-        params = extract_onshape_params(request.args.to_dict())
-        document_id = params['document_id']
-        workspace_id = params['workspace_id']
-        element_id = params['element_id']
+        template_path = os.path.join(os.path.dirname(__file__), 'PenguinCAM-config-template.yaml')
 
-        if not all([document_id, workspace_id, element_id]):
-            return jsonify({
-                'error': 'Missing required parameters',
-                'required': ['documentId', 'workspaceId', 'elementId']
-            }), 400
+        if not os.path.exists(template_path):
+            return jsonify({'error': 'Template file not found'}), 404
 
-        # Get Onshape client for this user
-        client, error_response, status_code = get_onshape_client_or_401()
-        if not client:
-            return error_response, status_code
-        
-        # List faces
+        return send_file(
+            template_path,
+            as_attachment=True,
+            download_name='PenguinCAM-config.yaml',
+            mimetype='text/yaml'
+        )
+    except Exception as e:
+        log(f"Error downloading config template: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/set-machine', methods=['POST'])
+@limiter.limit("30 per minute")
+def set_machine():
+    """Set the current machine for the session"""
+    try:
+        machine_id = request.json.get('machine_id')
+        if not machine_id:
+            return jsonify({'error': 'No machine_id provided'}), 400
+
+        # Verify machine exists in config
+        team_config_data = session.get('team_config_data', {})
+        team_config = TeamConfig(team_config_data)
+        machines = team_config.get_available_machines()
+
+        if machine_id not in machines:
+            return jsonify({'error': f'Unknown machine: {machine_id}'}), 400
+
+        # Store in session
+        session['machine_id'] = machine_id
+
+        # Return updated config for this machine
+        team_config_dict = team_config.to_dict(machine_id)
+
+        return jsonify({
+            'success': True,
+            'machine_id': machine_id,
+            'machine_name': machines[machine_id].get('name', machine_id),
+            'config': team_config_dict
+        })
+
+    except Exception as e:
+        log(f"Error setting machine: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/debug/session')
+@limiter.limit("30 per minute")
+def debug_session():
+    """Debug endpoint to see session contents (especially team config)"""
+    return jsonify({
+        'user_name': session.get('user_name'),
+        'user_email': session.get('user_email'),
+        'team_name': session.get('team_name'),
+        'team_config': session.get('team_config', {}),
+        'team_config_data_keys': list(session.get('team_config_data', {}).keys()),
+        'onshape_authenticated': session.get('onshape_authenticated'),
+    })
+
+@app.route('/debug/onshape/faces')
+@limiter.limit("10 per minute")
+def debug_onshape_faces():
+    """Debug endpoint to test Onshape face listing"""
+    if not ONSHAPE_AVAILABLE:
+        return jsonify({'error': 'Onshape integration not available'}), 400
+
+    # Get parameters
+    document_id = request.args.get('documentId')
+    workspace_id = request.args.get('workspaceId')
+    element_id = request.args.get('elementId')
+    body_id = request.args.get('bodyId')
+
+    if not all([document_id, workspace_id, element_id]):
+        return jsonify({
+            'error': 'Missing required parameters',
+            'required': ['documentId', 'workspaceId', 'elementId']
+        }), 400
+
+    # Get Onshape client
+    user_id = get_current_user_id()
+    client = session_manager.get_client(user_id)
+
+    if not client:
+        return jsonify({
+            'error': 'Not authenticated with Onshape',
+            'auth_url': '/onshape/auth'
+        }), 401
+
+    try:
+        log("\n" + "="*70)
+        log("DEBUG ENDPOINT: Testing face listing")
+        log("="*70)
+
+        # Test list_faces
         faces_data = client.list_faces(document_id, workspace_id, element_id)
-        
-        if faces_data:
+
+        if not faces_data:
             return jsonify({
-                'success': True,
-                'data': faces_data
-            })
-        else:
-            return jsonify({
-                'error': 'Failed to list faces',
-                'message': 'Check console for details'
+                'success': False,
+                'error': 'list_faces returned None'
             }), 500
-            
-    except Exception as e:
+
+        # Test auto_select_top_face
+        face_id, body_id_result, part_name, normal = client.auto_select_top_face(
+            document_id, workspace_id, element_id, body_id, faces_data
+        )
+
         return jsonify({
-            'error': f'Failed: {str(e)}'
-        }), 500
+            'success': True,
+            'faces_data_summary': {
+                'body_count': len(faces_data.get('bodies', [])),
+                'bodies': [
+                    {
+                        'id': body.get('id'),
+                        'name': body.get('properties', {}).get('name'),
+                        'face_count': len(body.get('faces', []))
+                    }
+                    for body in faces_data.get('bodies', [])
+                ]
+            },
+            'auto_selected': {
+                'face_id': face_id,
+                'body_id': body_id_result,
+                'part_name': part_name,
+                'normal': normal
+            } if face_id else None
+        })
 
-@app.route('/onshape/body-faces', methods=['GET'])
-@auth.require_auth
-def onshape_body_faces():
-    """
-    Get all faces for all bodies (or a specific body) in an element
-    """
-    try:
-        # Get parameters
-        params = extract_onshape_params(request.args.to_dict())
-        document_id = params['document_id']
-        workspace_id = params['workspace_id']
-        element_id = params['element_id']
-        body_id = params['body_id']  # Optional
-
-        if not all([document_id, workspace_id, element_id]):
-            return jsonify({
-                'error': 'Missing required parameters',
-                'required': ['documentId', 'workspaceId', 'elementId'],
-                'optional': ['bodyId']
-            }), 400
-
-        # Get Onshape client for this user
-        client, error_response, status_code = get_onshape_client_or_401()
-        if not client:
-            return error_response, status_code
-        
-        # Get faces for bodies
-        faces_by_body = client.get_body_faces(document_id, workspace_id, element_id, body_id)
-        
-        if faces_by_body:
-            return jsonify({
-                'success': True,
-                'bodies': faces_by_body
-            })
-        else:
-            return jsonify({
-                'error': 'Failed to get faces',
-                'message': 'Check console for details'
-            }), 500
-            
     except Exception as e:
+        import traceback
         return jsonify({
-            'error': f'Failed: {str(e)}'
+            'success': False,
+            'error': str(e),
+            'traceback': traceback.format_exc()
         }), 500
 
 @app.route('/onshape/import', methods=['GET', 'POST'])
 @limiter.limit("20 per minute")  # Moderate limit - authenticated via Onshape OAuth
-@auth.require_auth
 def onshape_import():
     """
     Import a DXF from Onshape
@@ -830,17 +1211,34 @@ def onshape_import():
         return jsonify({'error': 'Onshape integration not available'}), 400
 
     try:
-        # Log the complete incoming URL for debugging
-        print(f"\n🔗 Complete request URL: {request.url}")
-        print(f"   Method: {request.method}")
+        log(f"\n{'='*70}")
+        log(f"ONSHAPE IMPORT REQUEST")
+        log(f"{'='*70}")
+        log(f"Request URL: {request.url}")
+        log(f"Method: {request.method}")
+        log(f"Headers: {dict(request.headers)}")
 
         # Get parameters (either from query string or JSON body)
         if request.method == 'POST':
             raw_params = request.json or {}
+            log(f"Source: POST body (JSON)")
         else:
             raw_params = request.args.to_dict()
+            log(f"Source: Query string")
+
+        log(f"\n📝 RAW PARAMETERS RECEIVED:")
+        for key, value in sorted(raw_params.items()):
+            log(f"   {key}: {value!r}")
 
         params = extract_onshape_params(raw_params)
+
+        log(f"\n🔧 EXTRACTED PARAMETERS:")
+        log(f"   document_id: {params['document_id']!r}")
+        log(f"   workspace_id: {params['workspace_id']!r}")
+        log(f"   element_id: {params['element_id']!r}")
+        log(f"   face_id: {params['face_id']!r}")
+        log(f"   body_id: {params['body_id']!r}")
+
         document_id = params['document_id']
         workspace_id = params['workspace_id']
         element_id = params['element_id']
@@ -851,17 +1249,27 @@ def onshape_import():
         onshape_server = raw_params.get('server', 'https://cad.onshape.com')
         onshape_userid = raw_params.get('userId')
 
-        print(f"Onshape params received: {raw_params}")
-        print(f"  Extracted body_id/partId: {body_id!r}")
-        if body_id:
-            print(f"  ✅ User selected body/part: {body_id}")
+        log(f"\n🔍 PARAMETER ANALYSIS:")
+        if face_id:
+            log(f"   ✓ face_id provided: {face_id}")
+            if not face_id.startswith('J'):
+                log(f"   ⚠️  WARNING: face_id doesn't start with 'J' (unusual for Onshape IDs)")
+            if len(face_id) < 10:
+                log(f"   ⚠️  WARNING: face_id seems too short (Onshape IDs are usually longer)")
         else:
-            print(f"  ⚠️  No partId received - will search all parts in document")
+            log(f"   ℹ️  No face_id - will auto-select")
+
+        if body_id:
+            log(f"   ✓ body_id provided: {body_id}")
+        else:
+            log(f"   ℹ️  No body_id - will search all parts")
+
+        log(f"{'='*70}\n")
         
         # WORKAROUND: If params have placeholder strings, we can't proceed
         if (document_id and ('${' in str(document_id) or document_id.startswith('$'))):
-            print("❌ Onshape variable substitution failed!")
-            print(f"Received literal: documentId={document_id}")
+            log("❌ Onshape variable substitution failed!")
+            log(f"Received literal: documentId={document_id}")
 
             # Show helpful error page
             return render_template('index.html',
@@ -870,7 +1278,8 @@ def onshape_import():
                                      'issue': 'Onshape extension not substituting variables',
                                      'received_params': str(raw_params),
                                      'workaround': 'Export DXF manually from Onshape and upload it here'
-                                 }), 400
+                                 },
+                                 using_default_config=session.get('using_default_config', False)), 400
 
         if not all([document_id, workspace_id, element_id]):
             return jsonify({
@@ -896,56 +1305,33 @@ def onshape_import():
             # Redirect to Onshape OAuth
             return redirect('/onshape/auth')
 
-        # === TEST: Fetch user info, company info, and config file from Onshape ===
-        print("\n" + "="*60)
-        print("TESTING: Fetching user, company, and config info")
-        print("="*60)
+        # User info and team config already loaded during OAuth callback
+        # Session contains: user_name, user_email, team_config, team_config_data
 
-        # 1. Get user session info
-        print("\n1️⃣  User Session Info:")
-        user_session = client.get_user_session_info()
-        if user_session:
-            print(f"   Name: {user_session.get('name')}")
-            print(f"   Email: {user_session.get('email')}")
-            print(f"   ID: {user_session.get('id', 'N/A')}")
-
-        # 2. Get document's owning company
-        print("\n2️⃣  Document Company:")
+        # Get document's owning company/classroom (Onshape Education context)
+        # This requires a document, so we fetch it here rather than during OAuth
         doc_company = client.get_document_company(document_id)
         if doc_company:
-            print(f"   Company Name: {doc_company.get('name')}")
-            print(f"   Company ID: {doc_company.get('id')}")
-        else:
-            print("   No company found (document may be owned by user)")
-
-        # 3. Get team config file
-        print("\n3️⃣  Team Configuration File:")
-        team_config = client.fetch_config_file()
-        if team_config:
-            print("   ✅ Successfully fetched team configuration:")
-            print(json.dumps(team_config, indent=2))
-        else:
-            print("   ⚠️  No team configuration found (this is OK for testing)")
-
-        print("\n" + "="*60 + "\n")
-        # === END TEST ===
+            team_name = doc_company.get('name')
+            log(f"📚 Document company: {team_name}")
+            session['team_name'] = team_name
 
         # If no face_id provided, auto-select the top face
         part_name_from_body = None
         auto_selected_body_id = None
         face_normal = None  # Initialize face_normal for when face_id is provided
         if not face_id:
-            print("No face ID provided, auto-selecting top face...")
+            log("No face ID provided, auto-selecting top face...")
 
             try:
                 # First, try to list all faces for debugging
                 faces_data = client.list_faces(document_id, workspace_id, element_id)
                 body_count = len(faces_data.get('bodies', [])) if faces_data else 0
-                print(f"📊 Found {body_count} bodies/parts in document")
+                log(f"📊 Found {body_count} bodies/parts in document")
 
                 # If multiple parts and no bodyId specified, show part selection modal
                 if body_count > 1 and not body_id:
-                    print("🔍 Multiple parts detected, showing part selector...")
+                    log("🔍 Multiple parts detected, showing part selector...")
 
                     # Get detailed info about each part (reuse cached faces_data)
                     part_selection_data = []
@@ -994,7 +1380,8 @@ def onshape_import():
                                              'workspace_id': workspace_id,
                                              'element_id': element_id
                                          },
-                                         from_onshape=True)
+                                         from_onshape=True,
+                                         using_default_config=session.get('using_default_config', False))
 
                 # This now returns (face_id, body_id, part_name, normal)
                 # Pass body_id if user selected a specific part in Onshape, and cached data to avoid duplicate API call
@@ -1017,16 +1404,16 @@ def onshape_import():
                                              'workspaceId': workspace_id,
                                              'elementId': element_id,
                                              'bodies_found': face_count if faces_data else 0
-                                         }), 400
+                                         },
+                                         using_default_config=session.get('using_default_config', False)), 400
 
-                print(f"Auto-selected face: {face_id} from part: {part_name_from_body}")
+                log(f"Auto-selected face: {face_id} from part: {part_name_from_body}")
 
             except Exception as e:
-                print(f"Error in face detection: {str(e)}")
+                log(f"Error in face detection: {str(e)}")
                 return jsonify({
                     'error': 'Face detection failed',
-                    'message': str(e),
-                    'debug_url': f'/onshape/list-faces?documentId={document_id}&workspaceId={workspace_id}&elementId={element_id}'
+                    'message': str(e)
                 }), 400
         else:
             # face_id was provided (e.g., from element panel), but we need to fetch the face normal
@@ -1037,7 +1424,7 @@ def onshape_import():
         # Fetch DXF from Onshape
         # Use body_id from URL parameter if provided, otherwise use the one from auto-selection
         export_body_id = body_id if body_id else auto_selected_body_id
-        print(f"Exporting with body_id: {export_body_id} (from {'URL param' if body_id else 'auto-selection'})")
+        log(f"Exporting with body_id: {export_body_id} (from {'URL param' if body_id else 'auto-selection'})")
 
         dxf_content = client.export_face_to_dxf(
             document_id, workspace_id, element_id, face_id, export_body_id, face_normal
@@ -1062,26 +1449,26 @@ def onshape_import():
                 }
             }), 500
         
-        print(f"📄 DXF content received: {len(dxf_content)} bytes")
+        log(f"📄 DXF content received: {len(dxf_content)} bytes")
 
         # Generate filename: try to combine document name + part name
         doc_name = None
 
         # Try to get document name (optional, may fail with 404)
         try:
-            print("📝 Attempting to fetch document name...")
+            log("📝 Attempting to fetch document name...")
             doc_info = client.get_document_info(document_id)
             if doc_info:
                 doc_name = doc_info.get('name')
-                print(f"   ✅ Got document name: {doc_name}")
+                log(f"   ✅ Got document name: {doc_name}")
             else:
-                print(f"   ⚠️  Document API returned None")
+                log(f"   ⚠️  Document API returned None")
         except Exception as e:
-            print(f"   ⚠️  Document API failed (will use part name only): {e}")
+            log(f"   ⚠️  Document API failed (will use part name only): {e}")
 
         # Build filename from whatever we have
         suggested_filename = generate_onshape_filename(doc_name, part_name_from_body)
-        print(f"✅ Generated filename: {suggested_filename}.nc")
+        log(f"✅ Generated filename: {suggested_filename}.nc")
 
         # Save DXF to temp file in uploads folder
         temp_dxf = tempfile.NamedTemporaryFile(
@@ -1091,23 +1478,74 @@ def onshape_import():
         )
         temp_dxf.write(dxf_content)
         temp_dxf.close()
-        
+
         dxf_filename = os.path.basename(temp_dxf.name)
         dxf_path = temp_dxf.name
-        
-        print(f"✅ DXF imported from Onshape: {dxf_filename}")
-        print(f"📂 Saved to: {dxf_path}")
-        print(f"📏 File size on disk: {os.path.getsize(dxf_path)} bytes")
-        print(f"🔗 Will be served at: /uploads/{dxf_filename}")
+
+        log(f"✅ DXF imported from Onshape: {dxf_filename}")
+        log(f"📂 Saved to: {dxf_path}")
+        log(f"📏 File size on disk: {os.path.getsize(dxf_path)} bytes")
+
+        # Register DXF file with token manager for secure access
+        dxf_token = file_token_manager.register_file(dxf_path, f"{suggested_filename}.dxf")
+        log(f"🔗 Will be served at: /uploads/{dxf_token[:16]}...")
 
         # Render main page with DXF auto-loaded
         # The frontend will detect the dxf_file parameter and auto-upload it
-        return render_template('index.html', 
-                             dxf_file=dxf_filename,
+
+        # Reconstruct TeamConfig to get materials list
+        team_config_data = session.get('team_config_data', {})
+        team_config = TeamConfig(team_config_data)
+
+        # Get available machines
+        machines = team_config.get_available_machines()
+
+        # Get current machine (from session, or use default)
+        current_machine_id = session.get('machine_id', team_config.default_machine_id)
+
+        # Get machine-specific config dict
+        team_config_dict = team_config.to_dict(current_machine_id)
+        drive_enabled = team_config_dict.get('google_drive_enabled', False)
+        machine_x_max = team_config_dict.get('machine_x_max', 48.0)
+        machine_y_max = team_config_dict.get('machine_y_max', 96.0)
+        default_tool_diameter = team_config_dict.get('default_tool_diameter', 0.157)
+
+        # Get user/team info
+        user_name = session.get('user_name')
+        team_name = session.get('team_name')
+
+        # Get available materials for current machine
+        available_materials = team_config.get_available_materials(current_machine_id)
+
+        # Add 'aluminum_tube' as a special UI-only material (uses aluminum preset)
+        available_materials['aluminum_tube'] = {
+            **available_materials.get('aluminum', {}),
+            'name': 'Aluminum Tube'
+        }
+
+        # Check for incomplete materials
+        incomplete_materials = {
+            material_id for material_id in available_materials.keys()
+            if not team_config.is_material_complete(material_id, current_machine_id) and material_id != 'aluminum_tube'
+        }
+
+        return render_template('index.html',
+                             dxf_file=dxf_token,  # Pass token instead of filename
                              from_onshape=True,
                              document_id=document_id,
                              face_id=face_id,
-                             suggested_filename=suggested_filename or '')
+                             suggested_filename=suggested_filename or '',
+                             user_name=user_name,
+                             team_name=team_name,
+                             drive_enabled=drive_enabled,
+                             machine_x_max=machine_x_max,
+                             machine_y_max=machine_y_max,
+                             default_tool_diameter=default_tool_diameter,
+                             using_default_config=session.get('using_default_config', False),
+                             machines=machines,
+                             current_machine_id=current_machine_id,
+                             materials=available_materials,
+                             incomplete_materials=incomplete_materials)
         
     except Exception as e:
         return jsonify({
@@ -1116,7 +1554,6 @@ def onshape_import():
 
 @app.route('/onshape/save-dxf', methods=['GET', 'POST'])
 @limiter.limit("20 per minute")  # Moderate limit - authenticated via Onshape OAuth
-@auth.require_auth
 def onshape_save_dxf():
     """
     Save a DXF from Onshape directly to Google Drive without generating G-code.
@@ -1129,8 +1566,8 @@ def onshape_save_dxf():
         return jsonify({'error': 'Google Drive integration not available'}), 400
 
     try:
-        print(f"\n💾 Onshape Save DXF request: {request.url}")
-        print(f"   Method: {request.method}")
+        log(f"\n💾 Onshape Save DXF request: {request.url}")
+        log(f"   Method: {request.method}")
 
         # Get parameters (either from query string or JSON body)
         if request.method == 'POST':
@@ -1145,7 +1582,7 @@ def onshape_save_dxf():
         face_id = params['face_id']
         body_id = params['body_id']
 
-        print(f"Onshape params: doc={document_id}, workspace={workspace_id}, element={element_id}, face={face_id}, body={body_id}")
+        log(f"Onshape params: doc={document_id}, workspace={workspace_id}, element={element_id}, face={face_id}, body={body_id}")
 
         if not all([document_id, workspace_id, element_id]):
             return jsonify({
@@ -1169,7 +1606,7 @@ def onshape_save_dxf():
         face_normal = None
 
         if not face_id:
-            print("No face ID, auto-selecting top face...")
+            log("No face ID, auto-selecting top face...")
             try:
                 # Use existing auto_select_top_face helper
                 face_id, auto_selected_body_id, part_name_from_body, face_normal = client.auto_select_top_face(
@@ -1183,7 +1620,7 @@ def onshape_save_dxf():
                     }), 400
 
             except Exception as e:
-                print(f"Error in face detection: {str(e)}")
+                log(f"Error in face detection: {str(e)}")
                 return jsonify({
                     'error': 'Face detection failed',
                     'message': str(e)
@@ -1196,7 +1633,7 @@ def onshape_save_dxf():
 
         # Export DXF from Onshape
         export_body_id = body_id if body_id else auto_selected_body_id
-        print(f"Exporting DXF with body_id: {export_body_id}")
+        log(f"Exporting DXF with body_id: {export_body_id}")
 
         dxf_content = client.export_face_to_dxf(
             document_id, workspace_id, element_id, face_id, export_body_id, face_normal
@@ -1211,7 +1648,7 @@ def onshape_save_dxf():
                 }
             }), 500
 
-        print(f"📄 DXF exported: {len(dxf_content)} bytes")
+        log(f"📄 DXF exported: {len(dxf_content)} bytes")
 
         # Generate filename with timestamp
         doc_name = None
@@ -1219,18 +1656,17 @@ def onshape_save_dxf():
             doc_info = client.get_document_info(document_id)
             if doc_info:
                 doc_name = doc_info.get('name')
-                print(f"📝 Document name: {doc_name}")
+                log(f"📝 Document name: {doc_name}")
         except Exception as e:
-            print(f"⚠️  Could not get document name: {e}")
+            log(f"⚠️  Could not get document name: {e}")
 
         base_filename = generate_onshape_filename(doc_name, part_name_from_body)
 
-        # Add timestamp
-        pacific_time = datetime.now(ZoneInfo("America/Los_Angeles"))
-        timestamp = pacific_time.strftime("%Y%m%d_%H%M%S")
+        # Add timestamp (server's local time)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         dxf_filename = f"{base_filename}_{timestamp}.dxf"
 
-        print(f"✅ Generated filename: {dxf_filename}")
+        log(f"✅ Generated filename: {dxf_filename}")
 
         # Save DXF to temp file
         temp_dxf = tempfile.NamedTemporaryFile(
@@ -1242,7 +1678,7 @@ def onshape_save_dxf():
         temp_dxf.close()
 
         dxf_path = temp_dxf.name
-        print(f"💾 Saved temp DXF: {dxf_path}")
+        log(f"💾 Saved temp DXF: {dxf_path}")
 
         # Upload to Google Drive
         creds = None
@@ -1262,7 +1698,7 @@ def onshape_save_dxf():
                 'error': 'Failed to authenticate with Google Drive'
             }), 500
 
-        print("📤 Uploading to Google Drive...")
+        log("📤 Uploading to Google Drive...")
         result = uploader.upload_file(dxf_path, dxf_filename)
 
         # Clean up temp file
@@ -1272,7 +1708,7 @@ def onshape_save_dxf():
             pass
 
         if result and result.get('success'):
-            print(f"✅ Upload successful: {result.get('web_link')}")
+            log(f"✅ Upload successful: {result.get('web_link')}")
             return jsonify({
                 'success': True,
                 'message': f'✅ DXF saved to Google Drive: {dxf_filename}',
@@ -1288,8 +1724,8 @@ def onshape_save_dxf():
             }), 500
 
     except Exception as e:
-        print(f"❌ Error in save-dxf: {str(e)}")
-        traceback.print_exc()
+        log(f"❌ Error in save-dxf: {str(e)}")
+        log(traceback.format_exc())
         return jsonify({
             'error': f'Save DXF failed: {str(e)}'
         }), 500
@@ -1315,26 +1751,33 @@ def onshape_element_panel():
 
 def cleanup():
     """Clean up temporary files on shutdown"""
+    # Skip cleanup for serverless - containers are ephemeral
+    if IS_SERVERLESS:
+        return
+
     try:
         shutil.rmtree(TEMP_DIR)
-    except:
-        pass
+        log(f"🗑️  Cleaned up temp directory: {TEMP_DIR}")
+    except Exception as e:
+        log(f"⚠️  Failed to clean up temp directory: {e}")
 
-atexit.register(cleanup)
+# Register cleanup only if not serverless (serverless containers auto-cleanup)
+if not IS_SERVERLESS:
+    atexit.register(cleanup)
 
 if __name__ == '__main__':
     # Get port from environment variable (Railway) or default to 6238 for local dev
     port = int(os.environ.get('PORT', 6238))
     
-    print("="*70)
-    print("PenguinCAM - FRC Team 6238")
-    print("="*70)
-    print(f"\nPost-processor script: {POST_PROCESSOR}")
-    print(f"Temporary directory: {TEMP_DIR}")
-    print("\n🚀 Starting server...")
-    print(f"📂 Server will run on port: {port}")
-    print("\n⚠️  Press Ctrl+C to stop the server\n")
-    print("="*70)
+    log("="*70)
+    log("PenguinCAM - FRC Team 6238")
+    log("="*70)
+    log(f"\nPost-processor script: {POST_PROCESSOR}")
+    log(f"Temporary directory: {TEMP_DIR}")
+    log("\n🚀 Starting server...")
+    log(f"📂 Server will run on port: {port}")
+    log("\n⚠️  Press Ctrl+C to stop the server\n")
+    log("="*70)
     
     # Disable debug mode in production
     debug_mode = os.environ.get('FLASK_ENV') != 'production'
