@@ -1428,6 +1428,9 @@ class FRCPostProcessor:
         # Buffer inward (negative buffer)
         offset_poly = pocket_poly.buffer(-self.tool_radius)
 
+        if offset_poly.geom_type == "MultiPolygon":
+            offset_poly = max(offset_poly.geoms, key=lambda p: p.area)
+
         if offset_poly.is_empty or offset_poly.area < 0.001:
             center_x, center_y = self._get_polygon_center(pocket_poly)
             error_msg = f"Pocket at approximately ({center_x:.3f}, {center_y:.3f}) is too small for {self.tool_diameter:.4f}\" tool - tool cannot fit inside with proper clearance"
@@ -1444,11 +1447,28 @@ class FRCPostProcessor:
             return gcode
 
         # Use pocket centroid as entry position (center of pocket)
-        entry_x = offset_poly.centroid.x
-        entry_y = offset_poly.centroid.y
+        entry_point = offset_poly.representative_point()
+        entry_x, entry_y = entry_point.x, entry_point.y
 
         # Detect if pocket is circular
         is_circular = self._is_pocket_circular(pocket_points)
+
+        # Detect if pocket is circular
+        is_circular = self._is_pocket_circular(pocket_points)
+
+        # --- NEW: Aspect-ratio gate to avoid treating slots as circular ---
+        minx, miny, maxx, maxy = offset_poly.bounds
+        w = maxx - minx
+        h = maxy - miny
+
+        # Guard against divide-by-zero
+        if w > 1e-9 and h > 1e-9:
+            aspect = max(w / h, h / w)
+
+            # If it's "long and skinny", it's slot-like, not truly circular
+            # Tune threshold: 1.3–1.5 is typical; start at 1.4
+            if aspect > 1.4:
+                is_circular = False
 
         # Calculate helical entry parameters
         #helix_radius = self.tool_diameter * 0.75  # Small helix for entry
