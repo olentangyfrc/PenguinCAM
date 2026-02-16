@@ -258,6 +258,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
 
 
+
         // File upload handling
         dropZone.addEventListener('click', () => fileInput.click());
 
@@ -374,11 +375,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 switchMode('preview');
                 visualizeGcode(data.gcode);
 
-                // Enable download and drive buttons
-                downloadBtn.disabled = false;
-                if (driveAvailable) {
-                    driveBtn.disabled = false;
-                }
 
             } catch (error) {
                 if (Object.hasOwn(error, "details")) {
