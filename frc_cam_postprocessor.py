@@ -733,6 +733,28 @@ class FRCPostProcessor:
         # Sort holes to minimize travel time
         self._sort_holes()
 
+    #pocket hole fix start
+    def _compute_safe_helix_radius(self, entry_x, entry_y, offset_points):
+        from shapely.geometry import LineString, Point
+
+        center_point = Point(entry_x, entry_y)
+        min_edge_distance = float('inf')
+
+        for i in range(len(offset_points)):
+            p1 = offset_points[i]
+            p2 = offset_points[(i + 1) % len(offset_points)]
+            edge = LineString([p1, p2])
+            min_edge_distance = min(min_edge_distance, center_point.distance(edge))
+
+        margin = 0.01
+        max_radius = max(0.0, min_edge_distance - self.tool_radius - margin)
+
+        default_radius = self.tool_diameter * 0.75
+
+        return max(self.tool_diameter * 0.1, min(default_radius, max_radius))
+    #pocket hole fix end
+
+
     def _optimize_route(self, items, item_type="items"):
         """
         Generic route optimization using nearest neighbor + 2-opt algorithm.
@@ -1429,7 +1451,9 @@ class FRCPostProcessor:
         is_circular = self._is_pocket_circular(pocket_points)
 
         # Calculate helical entry parameters
-        helix_radius = self.tool_diameter * 0.75  # Small helix for entry
+        #helix_radius = self.tool_diameter * 0.75  # Small helix for entry
+        helix_radius = self._compute_safe_helix_radius(entry_x, entry_y, offset_points)
+
         ramp_start_height = self.material_top + self.ramp_start_clearance
         num_helical_passes, depth_per_pass = self._calculate_helical_passes(helix_radius, ramp_start_height=ramp_start_height)
 
@@ -1718,7 +1742,11 @@ class FRCPostProcessor:
 
                     if remaining_depth > 0.001:  # Only if significant depth remains
                         # Use small helical loop instead of straight plunge
-                        helix_radius = self.tool_diameter * 0.75  # Small radius, safe for any geometry
+                        #helix_radius = self.tool_diameter * 0.75  # Small radius, safe for any geometry
+                        helix_center_x = current_pos[0]
+                        helix_center_y = current_pos[1]
+                        helix_radius = self._compute_safe_helix_radius(helix_center_x, helix_center_y, offset_points)
+
                         helix_center_x = current_pos[0]
                         helix_center_y = current_pos[1]
 
