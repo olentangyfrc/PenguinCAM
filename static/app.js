@@ -207,8 +207,7 @@ document.addEventListener('DOMContentLoaded', () => {
         // DOM elements
         const dropZone = document.getElementById('dropZone');
         const fileInput = document.getElementById('fileInput');
-        const fileInfo = document.getElementById('fileInfo');
-        const fileName = document.getElementById('fileName');
+        const fileInfo = document.getElementById('fileLoadedCard');
         const fileSize = document.getElementById('fileSize');
         const generateBtn = document.getElementById('generateBtn');
         const downloadBtn = document.getElementById('downloadBtn');
@@ -344,7 +343,10 @@ document.addEventListener('DOMContentLoaded', () => {
             if (!uploadedFile) return;
 
             const formData = new FormData();
-            formData.append('file', uploadedFile);
+            const name = (uploadedFile?.name || suggestedFilename || 'upload.dxf');
+            const fixedName = name.toLowerCase().endsWith('.dxf') ? name : `${name}.dxf`;
+
+            formData.append('file', uploadedFile, fixedName);
             const material = document.getElementById('material').value;
             formData.append('material', material);
             formData.append('tool_diameter', document.getElementById('toolDiameter').value);

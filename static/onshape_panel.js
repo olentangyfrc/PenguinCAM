@@ -31,13 +31,22 @@
         window.parent.postMessage(initMessage, '*');
         console.log('Sent applicationInit:', initMessage);
 
-        // Request current selection state (in case face is already selected)
-        // Onshape will respond with a SELECTION message
-        window.parent.postMessage({ messageName: 'getSelections' }, '*');
-        console.log('Requested current selections');
-
         // Listen for messages from Onshape
         window.addEventListener('message', handleMessage);
+
+        // Request current selection state (in case face is already selected)
+        // Onshape will respond with a SELECTION message
+        // Do this AFTER listener is set up so we can receive the response
+        const selectionMessage = {
+            messageName: 'requestSelection',
+            messageId: 'penguincam-init-' + Date.now(), // Unique ID for this request
+            documentId: context.documentId,
+            workspaceId: context.workspaceId,
+            elementId: context.elementId,
+            entityTypeSpecifier: ['FACE'] // Array of entity types we're looking for
+        };
+        // window.parent.postMessage(selectionMessage, '*');
+        console.log('Requested current selection:', selectionMessage);
 
         // Set up button handlers
         sendBtn.addEventListener('click', handleSendToPenguinCAM);
@@ -74,7 +83,7 @@
         );
 
         if (faceSelection) {
-            // Face selected
+            // Valid face selected
             selectedFaceId = faceSelection.selectionId;
             selectedPartId = faceSelection.partId || null;
 
@@ -85,18 +94,54 @@
             // Enable button
             sendBtn.disabled = false;
 
-            console.log('Face selected:', selectedFaceId, 'Part:', selectedPartId);
+            console.log('✓ Face selected:', selectedFaceId, 'Part:', selectedPartId, 'Full selection:', faceSelection);
         } else {
-            // No face selected - reset UI
+            // No valid face - reset state
             selectedFaceId = null;
             selectedPartId = null;
-
-            instruction.style.display = 'block';
             buttonGroup.style.display = 'none';
-
             sendBtn.disabled = true;
 
-            console.log('No face selected');
+            // Check for common mistakes and show helpful message
+            if (selections.length === 0) {
+                // Nothing selected
+                instruction.innerHTML = 'Select a face to export';
+                instruction.style.color = '';
+            } else {
+                // Something selected, but not a face - provide helpful guidance
+                const selection = selections[0];
+                const entityType = selection.entityType;
+
+                console.log('✗ Invalid selection:', entityType);
+
+                if (entityType && entityType.startsWith('SKETCH')) {
+                    // User selected part of a sketch
+                    instruction.innerHTML = '⚠️ You selected a sketch element.<br>Please select a <strong>face of a solid part</strong> instead.';
+                    instruction.style.color = '#FBB515';
+                } else if (entityType === 'EDGE') {
+                    // User selected an edge
+                    instruction.innerHTML = '⚠️ You selected an edge.<br>Please select a <strong>flat face</strong> instead.';
+                    instruction.style.color = '#FBB515';
+                } else if (entityType === 'VERTEX') {
+                    // User selected a vertex/point
+                    instruction.innerHTML = '⚠️ You selected a vertex.<br>Please select a <strong>flat face</strong> instead.';
+                    instruction.style.color = '#FBB515';
+                } else if (entityType === 'BODY') {
+                    // User selected entire body
+                    instruction.innerHTML = '⚠️ You selected an entire body.<br>Please select a <strong>single flat face</strong> instead.';
+                    instruction.style.color = '#FBB515';
+                } else if (entityType === 'MATE_CONNECTOR') {
+                    // User selected a mate connector
+                    instruction.innerHTML = '⚠️ You selected a mate connector.<br>Please select a <strong>flat face</strong> instead.';
+                    instruction.style.color = '#FBB515';
+                } else {
+                    // Unknown entity type
+                    instruction.innerHTML = `⚠️ Invalid selection (${entityType}).<br>Please select a <strong>flat face of a solid part</strong>.`;
+                    instruction.style.color = '#FBB515';
+                }
+            }
+
+            instruction.style.display = 'block';
         }
     }
 
