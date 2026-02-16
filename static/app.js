@@ -257,30 +257,6 @@ document.addEventListener('DOMContentLoaded', () => {
             if (tabsGroup) tabsGroup.style.display = isAluminumTube ? 'none' : 'block';
         });
 
-        // Check Google Drive availability
-        let driveAvailable = false;
-        async function checkDriveStatus() {
-            try {
-                const response = await fetch('/drive/status');
-                const data = await response.json();
-
-                if (data.available && data.configured) {
-                    driveAvailable = true;
-                    driveBtn.style.display = 'inline-block';
-                } else if (data.available && !data.configured) {
-                    driveStatus.textContent = '⚠️ Google Drive not configured - see GOOGLE_DRIVE_SETUP.md';
-                    driveStatus.style.display = 'block';
-                    driveStatus.style.color = '#FFA500';
-                }
-            } catch (error) {
-                // Drive integration not available - that's okay
-                console.log('Google Drive integration not available');
-            }
-        }
-        checkDriveStatus();
-
-        // Setup auto-save for settings
-        setupSettingsAutoSave();
 
         // File upload handling
         dropZone.addEventListener('click', () => fileInput.click());
