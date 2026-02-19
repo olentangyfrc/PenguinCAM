@@ -1399,6 +1399,10 @@ class FRCPostProcessor:
             True if pocket is circular, False otherwise
         """
         pocket_poly = Polygon(pocket_points)
+        # Clean geometry to reduce buffer artifacts on curved/skinny slots
+        if not pocket_poly.is_valid:
+            pocket_poly = pocket_poly.buffer(0)
+
         cx = pocket_poly.centroid.x
         cy = pocket_poly.centroid.y
 
@@ -1571,6 +1575,9 @@ class FRCPostProcessor:
             while True:
                 test_offset -= stepover
                 test_poly = pocket_poly.buffer(test_offset)
+                if test_poly.geom_type == "MultiPolygon":
+                    # keep the largest region (or iterate all regions — see note below)
+                    test_poly = max(test_poly.geoms, key=lambda p: p.area)
                 if test_poly.is_empty or test_poly.area < 0.001:
                     break
                 if not hasattr(test_poly, 'exterior'):
@@ -1597,7 +1604,10 @@ class FRCPostProcessor:
                     gcode.append(f"G1 X{contour_points[0][0]:.4f} Y{contour_points[0][1]:.4f} F{self.feed_rate}")
 
                     # Return to center between passes for safety
-                    gcode.append(f"G1 X{entry_x:.4f} Y{entry_y:.4f} F{self.feed_rate}")
+                    # Retract + reposition between contour passes (avoid cutting across material)
+                    gcode.append(f"G0 Z{self.safe_height:.4f}  ; Retract between passes")
+                    gcode.append(f"G0 X{entry_x:.4f} Y{entry_y:.4f}  ; Move to safe center")
+                    gcode.append(f"G1 Z{target_z:.4f} F{self.approach_rate}  ; Plunge back to cut depth")
 
         # Final pass - cut actual perimeter at exact size
         gcode.append(f"(Final pass: cut exact perimeter)")
