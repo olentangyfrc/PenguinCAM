@@ -383,7 +383,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 gcodeContent = data.gcode;
                 outputFilename = data.filename;
-
+                downloadBtn.disabled = false;
                 // Show results
                 showResults(data);
 
