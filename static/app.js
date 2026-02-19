@@ -1,7 +1,10 @@
 // ============================================================================
 // Application State
 // ============================================================================
-
+if (window.__PENGUIN_CAM_APP_LOADED__) {
+  console.warn("app.js already loaded - skipping re-init");
+} else {
+  window.__PENGUIN_CAM_APP_LOADED__ = true;
 const appState = {
     // File upload
     uploadedFile: null,
@@ -74,14 +77,27 @@ function saveSettings() {
  */
 function loadSettings() {
     try {
+                const cleanNumberString = (v, fallback) => {
+          const s = (v ?? "").toString().trim().toLowerCase();
+          if (!s || s === "none" || s === "nan" || s === "null" || s === "undefined") return fallback;
+          return v;
+        };
         const saved = localStorage.getItem('penguinCAM_settings');
         const settings = saved ? JSON.parse(saved) : DEFAULT_SETTINGS;
 
         // Apply settings to form elements
         document.getElementById('material').value = settings.material || DEFAULT_SETTINGS.material;
-        document.getElementById('thickness').value = settings.thickness || DEFAULT_SETTINGS.thickness;
-        document.getElementById('tabSpacing').value = settings.tabSpacing || DEFAULT_SETTINGS.tabSpacing;
-        document.getElementById('tubeHeight').value = settings.tubeHeight || DEFAULT_SETTINGS.tubeHeight;
+        document.getElementById('thickness').value =
+  cleanNumberString(settings.thickness, DEFAULT_SETTINGS.thickness);
+
+document.getElementById('tabSpacing').value =
+  cleanNumberString(settings.tabSpacing, DEFAULT_SETTINGS.tabSpacing);
+
+document.getElementById('tubeHeight').value =
+  cleanNumberString(settings.tubeHeight, DEFAULT_SETTINGS.tubeHeight);
+
+document.getElementById('toolDiameter').value =
+  cleanNumberString(settings.toolDiameter, DEFAULT_SETTINGS.toolDiameter);
         document.getElementById('squareEnd').checked = settings.squareEnd !== undefined ? settings.squareEnd : DEFAULT_SETTINGS.squareEnd;
         document.getElementById('cutToLength').checked = settings.cutToLength !== undefined ? settings.cutToLength : DEFAULT_SETTINGS.cutToLength;
         document.getElementById('toolDiameter').value = settings.toolDiameter || DEFAULT_SETTINGS.toolDiameter;
@@ -1802,4 +1818,4 @@ document.addEventListener('DOMContentLoaded', () => {
                 renderDxfSetup(); // Re-render with new size
             }
         });
-});
+});};
