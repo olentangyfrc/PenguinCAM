@@ -55,44 +55,44 @@ class PostProcessorResult:
 MATERIAL_PRESETS = {
     'plywood': {
         'name': 'Plywood',
-        'feed_rate': 75.0,        # Cutting feed rate (IPM)
-        'ramp_feed_rate': 50.0,   # Ramp feed rate (IPM)
-        'plunge_rate': 35.0,      # Plunge feed rate (IPM) for tab Z moves
-        'spindle_speed': 18000,   # RPM
-        'ramp_angle': 20.0,       # Ramp angle in degrees
+        'feed_rate': 75.0,  # Cutting feed rate (IPM)
+        'ramp_feed_rate': 50.0,  # Ramp feed rate (IPM)
+        'plunge_rate': 35.0,  # Plunge feed rate (IPM) for tab Z moves
+        'spindle_speed': 18000,  # RPM
+        'ramp_angle': 20.0,  # Ramp angle in degrees
         'ramp_start_clearance': 0.150,  # Clearance above material to start ramping (inches)
-        'stepover_percentage': 0.65,    # Radial stepover as fraction of tool diameter (65% for plywood)
-        'max_slotting_depth': 0.4,      # Maximum depth per pass for perimeter slotting (inches)
-        'tab_width': 0.25,        # Tab width (inches)
-        'tab_height': 0.15,        # Tab height (inches)
+        'stepover_percentage': 0.65,  # Radial stepover as fraction of tool diameter (65% for plywood)
+        'max_slotting_depth': 0.4,  # Maximum depth per pass for perimeter slotting (inches)
+        'tab_width': 0.25,  # Tab width (inches)
+        'tab_height': 0.15,  # Tab height (inches)
         'description': 'Standard plywood settings - 18K RPM, 75 IPM cutting'
     },
     'aluminum': {
         'name': 'Aluminum',
-        'feed_rate': 55.0,        # Cutting feed rate (IPM)
-        'ramp_feed_rate': 35.0,   # Ramp feed rate (IPM)
-        'plunge_rate': 15.0,      # Plunge feed rate (IPM) for tab Z moves - slower for aluminum
-        'spindle_speed': 18000,   # RPM
-        'ramp_angle': 4.0,        # Ramp angle in degrees
+        'feed_rate': 55.0,  # Cutting feed rate (IPM)
+        'ramp_feed_rate': 35.0,  # Ramp feed rate (IPM)
+        'plunge_rate': 15.0,  # Plunge feed rate (IPM) for tab Z moves - slower for aluminum
+        'spindle_speed': 18000,  # RPM
+        'ramp_angle': 4.0,  # Ramp angle in degrees
         'ramp_start_clearance': 0.050,  # Clearance above material to start ramping (inches)
-        'stepover_percentage': 0.25,    # Radial stepover as fraction of tool diameter (25% conservative for aluminum)
-        'max_slotting_depth': 0.2,      # Maximum depth per pass for perimeter slotting (inches)
-        'tab_width': 0.25,        # Tab width (inches) - same as plywood
-        'tab_height': 0.15,       # Tab height (inches) - same as plywood
+        'stepover_percentage': 0.25,  # Radial stepover as fraction of tool diameter (25% conservative for aluminum)
+        'max_slotting_depth': 0.2,  # Maximum depth per pass for perimeter slotting (inches)
+        'tab_width': 0.25,  # Tab width (inches) - same as plywood
+        'tab_height': 0.15,  # Tab height (inches) - same as plywood
         'description': 'Aluminum box tubing - 18K RPM, 55 IPM cutting, 4° ramp'
     },
     'polycarbonate': {
         'name': 'Polycarbonate',
-        'feed_rate': 50.0,        # Same as plywood
-        'ramp_feed_rate': 30.0,   # Same as plywood
-        'plunge_rate': 20.0,      # Same as plywood - matches Fusion 360
-        'spindle_speed': 18000,   # RPM
-        'ramp_angle': 20.0,       # Same as plywood
+        'feed_rate': 50.0,  # Same as plywood
+        'ramp_feed_rate': 30.0,  # Same as plywood
+        'plunge_rate': 20.0,  # Same as plywood - matches Fusion 360
+        'spindle_speed': 18000,  # RPM
+        'ramp_angle': 20.0,  # Same as plywood
         'ramp_start_clearance': 0.100,  # Clearance above material to start ramping (inches)
-        'stepover_percentage': 0.55,    # Radial stepover as fraction of tool diameter (55% moderate for polycarbonate)
-        'max_slotting_depth': 0.25,     # Maximum depth per pass for perimeter slotting (inches)
-        'tab_width': 0.25,        # Tab width (inches) - same as plywood
-        'tab_height': 0.15,        # Tab height (inches) - same as plywood
+        'stepover_percentage': 0.55,  # Radial stepover as fraction of tool diameter (55% moderate for polycarbonate)
+        'max_slotting_depth': 0.25,  # Maximum depth per pass for perimeter slotting (inches)
+        'tab_width': 0.25,  # Tab width (inches) - same as plywood
+        'tab_height': 0.15,  # Tab height (inches) - same as plywood
         'description': 'Polycarbonate - same as plywood settings'
     }
 }
@@ -150,6 +150,10 @@ class FRCPostProcessor:
 
         # Error tracking
         self.errors = []  # Collect validation errors during processing
+
+    def _safe_reposition(self, gcode, x, y):
+        gcode.append(f"G0 Z{self.safe_height:.4f}  ; Retract for travel")
+        gcode.append(f"G0 X{x:.4f} Y{y:.4f}        ; Travel")
 
     def apply_material_preset(self, material: str, machine_id: Optional[str] = None):
         # If config exists, let it override defaults; otherwise use built-ins
@@ -218,12 +222,12 @@ class FRCPostProcessor:
             print(f"  Plunge rate: {self.plunge_rate} IPM")
             print(f"  Ramp start clearance: {self.ramp_start_clearance}\"")
         print(f"  Ramp angle: {self.ramp_angle}°")
-        print(f"  Stepover: {self.stepover_percentage*100:.0f}% of tool diameter")
+        print(f"  Stepover: {self.stepover_percentage * 100:.0f}% of tool diameter")
         print(f"  Tab size: {preset['tab_width']}\" x {preset['tab_height']}\" (W x H)")
 
     def _distance_2d(self, p1: Tuple[float, float], p2: Tuple[float, float]) -> float:
         """Calculate 2D Euclidean distance between two points"""
-        return math.sqrt((p2[0] - p1[0])**2 + (p2[1] - p1[1])**2)
+        return math.sqrt((p2[0] - p1[0]) ** 2 + (p2[1] - p1[1]) ** 2)
 
     def _get_polygon_center(self, polygon) -> Tuple[float, float]:
         """
@@ -265,7 +269,7 @@ class FRCPostProcessor:
 
         # Initialize geometry lists for transform_coordinates compatibility
         self.lines = []  # Individual lines (converted to polylines)
-        self.arcs = []   # Individual arcs (converted to polylines)
+        self.arcs = []  # Individual arcs (converted to polylines)
         self.splines = []  # Individual splines (converted to polylines)
 
         # Extract polylines and lines (boundaries/pockets)
@@ -291,7 +295,8 @@ class FRCPostProcessor:
         splines = list(msp.query('SPLINE'))
 
         if lines or arcs or splines:
-            print(f"Found {len(lines)} lines, {len(arcs)} arcs, {len(splines)} splines - attempting to form closed paths...")
+            print(
+                f"Found {len(lines)} lines, {len(arcs)} arcs, {len(splines)} splines - attempting to form closed paths...")
             closed_paths = self._chain_entities_to_paths(lines, arcs, splines)
             self.polylines.extend(closed_paths)
 
@@ -496,7 +501,8 @@ class FRCPostProcessor:
                     # Closed path found!
                     if len(path_points) > 3:
                         closed_paths.append(path_points)
-                        print(f"  Found exact closed path with {len(path_points)} points using {len(path_segments)} segments")
+                        print(
+                            f"  Found exact closed path with {len(path_points)} points using {len(path_segments)} segments")
                     break
 
         return closed_paths
@@ -734,7 +740,7 @@ class FRCPostProcessor:
         # Sort holes to minimize travel time
         self._sort_holes()
 
-    #pocket hole fix start
+    # pocket hole fix start
     def _compute_safe_helix_radius(self, entry_x, entry_y, offset_points):
         from shapely.geometry import LineString, Point
 
@@ -753,8 +759,8 @@ class FRCPostProcessor:
         default_radius = self.tool_diameter * 0.75
 
         return max(self.tool_diameter * 0.1, min(default_radius, max_radius))
-    #pocket hole fix end
 
+    # pocket hole fix end
 
     def _optimize_route(self, items, item_type="items"):
         """
@@ -981,7 +987,8 @@ class FRCPostProcessor:
 
         gcode.append(f"(Machine: {machine.get('name', 'CNC Router')})")
         gcode.append(f"(Controller: {machine.get('controller', 'Generic')})")
-        gcode.append(f"(Units: {'Inches' if self.units == 'inch' else 'Millimeters'} - {'G20' if self.units == 'inch' else 'G21'})")
+        gcode.append(
+            f"(Units: {'Inches' if self.units == 'inch' else 'Millimeters'} - {'G20' if self.units == 'inch' else 'G21'})")
         gcode.append("(Coordinate system: G54)")
         gcode.append("(Plane: G17 - XY)")
         gcode.append("(Arc centers: Incremental - G91.1)")
@@ -1017,7 +1024,8 @@ class FRCPostProcessor:
 
         # Modal G-code setup (similar to Fusion 360)
         gcode.append("G90 G94 G91.1 G40 G49 G17")
-        gcode.append("(G90=Absolute, G94=Feed/min, G91.1=Arc centers incremental - IJK relative to start point, G40=Cutter comp cancel, G49=Tool length comp cancel, G17=XY plane)")
+        gcode.append(
+            "(G90=Absolute, G94=Feed/min, G91.1=Arc centers incremental - IJK relative to start point, G40=Cutter comp cancel, G49=Tool length comp cancel, G17=XY plane)")
 
         # Units
         if self.units == "inch":
@@ -1026,7 +1034,7 @@ class FRCPostProcessor:
             gcode.append("G21  ; Millimeters")
 
         # Home Z axis (G28) - use G0 for rapid speed
-        #gcode.append("G0 G28 G91 Z0.  ; Home Z axis at rapid speed") <-- OLD CODE, made into multiple lines by TS
+        # gcode.append("G0 G28 G91 Z0.  ; Home Z axis at rapid speed") <-- OLD CODE, made into multiple lines by TS
         gcode.append("G91")
         gcode.append("G28 Z0.")
 
@@ -1125,7 +1133,8 @@ class FRCPostProcessor:
             }
         )
 
-    def _calculate_helical_passes(self, toolpath_radius: float, target_angle_deg: float = None, ramp_start_height: float = None) -> Tuple[int, float]:
+    def _calculate_helical_passes(self, toolpath_radius: float, target_angle_deg: float = None,
+                                  ramp_start_height: float = None) -> Tuple[int, float]:
         """
         Calculate number of helical passes needed for a safe plunge angle.
 
@@ -1189,9 +1198,11 @@ class FRCPostProcessor:
 
         # Calculate helical entry passes
         entry_radius = min(stepover, final_toolpath_radius)  # Use first stepover radius
-        num_helical_passes, depth_per_pass = self._calculate_helical_passes(entry_radius, ramp_start_height=ramp_start_height)
+        num_helical_passes, depth_per_pass = self._calculate_helical_passes(entry_radius,
+                                                                            ramp_start_height=ramp_start_height)
 
-        gcode.append(f"(Hole {diameter:.3f}\" dia: helical entry at {entry_radius:.4f}\" radius, then {num_radial_passes} radial passes)")
+        gcode.append(
+            f"(Hole {diameter:.3f}\" dia: helical entry at {entry_radius:.4f}\" radius, then {num_radial_passes} radial passes)")
 
         # Position at edge of entry radius
         start_x = cx + entry_radius
@@ -1200,13 +1211,16 @@ class FRCPostProcessor:
         gcode.append(f"G1 Z{ramp_start_height:.4f} F{self.approach_rate}  ; Approach to ramp start height")
 
         # Helical entry in multiple passes using ramp feed rate
-        gcode.append(f"(Helical entry: {num_helical_passes} passes at {self.ramp_angle} deg, {depth_per_pass:.4f}\" per pass)")
+        gcode.append(
+            f"(Helical entry: {num_helical_passes} passes at {self.ramp_angle} deg, {depth_per_pass:.4f}\" per pass)")
         for pass_num in range(num_helical_passes):
             target_z = ramp_start_height - (pass_num + 1) * depth_per_pass
-            gcode.append(f"G3 X{start_x:.4f} Y{start_y:.4f} I{-entry_radius:.4f} J0 Z{target_z:.4f} F{self.ramp_feed_rate}  ; Helical pass {pass_num + 1}/{num_helical_passes} CCW for climb milling")
+            gcode.append(
+                f"G3 X{start_x:.4f} Y{start_y:.4f} I{-entry_radius:.4f} J0 Z{target_z:.4f} F{self.ramp_feed_rate}  ; Helical pass {pass_num + 1}/{num_helical_passes} CCW for climb milling")
 
         # Clean up pass at entry radius and final depth
-        gcode.append(f"G3 X{start_x:.4f} Y{start_y:.4f} I{-entry_radius:.4f} J0 F{self.feed_rate}  ; Clean up pass at entry radius CCW for climb milling")
+        gcode.append(
+            f"G3 X{start_x:.4f} Y{start_y:.4f} I{-entry_radius:.4f} J0 F{self.feed_rate}  ; Clean up pass at entry radius CCW for climb milling")
 
         # True Archimedean spiral outward from entry radius to final radius
         # Spiral equation: r = r_start + b*θ where b = stepover/(2π)
@@ -1221,7 +1235,8 @@ class FRCPostProcessor:
             angle_increment = math.radians(10)  # 10 degrees per segment
             num_points = int(math.ceil(total_angle / angle_increment))
 
-            gcode.append(f"(Archimedean spiral: {num_points} points from r={entry_radius:.4f}\" to r={final_toolpath_radius:.4f}\")")
+            gcode.append(
+                f"(Archimedean spiral: {num_points} points from r={entry_radius:.4f}\" to r={final_toolpath_radius:.4f}\")")
 
             # Cut continuous spiral from entry_radius to final_toolpath_radius
             # Use positive angle for counter-clockwise spiral (climb milling on inside feature)
@@ -1240,7 +1255,8 @@ class FRCPostProcessor:
         final_y = cy
         gcode.append(f"(Final cleanup pass at exact radius)")
         gcode.append(f"G1 X{final_x:.4f} Y{final_y:.4f} F{self.feed_rate}  ; Move to final radius")
-        gcode.append(f"G3 X{final_x:.4f} Y{final_y:.4f} I{-final_toolpath_radius:.4f} J0 F{self.feed_rate}  ; Cut final circle CCW for climb milling")
+        gcode.append(
+            f"G3 X{final_x:.4f} Y{final_y:.4f} I{-final_toolpath_radius:.4f} J0 F{self.feed_rate}  ; Cut final circle CCW for climb milling")
 
         # Retract
         gcode.append(f"G0 Z{self.retract_height:.4f}  ; Retract")
@@ -1253,8 +1269,8 @@ class FRCPostProcessor:
         Returns dict with breakdown of time components.
         """
         cutting_time = 0.0  # G1/G2/G3 moves
-        rapid_time = 0.0    # G0 moves
-        dwell_time = 0.0    # G4 pauses
+        rapid_time = 0.0  # G0 moves
+        dwell_time = 0.0  # G4 pauses
 
         # Assume typical rapid speed (machine dependent)
         rapid_speed = 400.0  # IPM - conservative estimate
@@ -1283,7 +1299,7 @@ class FRCPostProcessor:
                 if 'Z' in line:
                     z = float(re.search(r'Z([-\d.]+)', line).group(1))
 
-                distance = math.sqrt((x - current_x)**2 + (y - current_y)**2 + (z - current_z)**2)
+                distance = math.sqrt((x - current_x) ** 2 + (y - current_y) ** 2 + (z - current_z) ** 2)
                 rapid_time += distance / rapid_speed * 60  # Convert to seconds
 
                 current_x, current_y, current_z = x, y, z
@@ -1303,7 +1319,7 @@ class FRCPostProcessor:
                     feed = float(re.search(r'F([-\d.]+)', line).group(1))
                     current_feed = feed
 
-                distance = math.sqrt((x - current_x)**2 + (y - current_y)**2 + (z - current_z)**2)
+                distance = math.sqrt((x - current_x) ** 2 + (y - current_y) ** 2 + (z - current_z) ** 2)
                 cutting_time += distance / feed * 60  # Convert to seconds
 
                 current_x, current_y, current_z = x, y, z
@@ -1334,7 +1350,7 @@ class FRCPostProcessor:
                 # Calculate arc length (approximate)
                 center_x = current_x + i
                 center_y = current_y + j
-                radius = math.sqrt(i**2 + j**2)
+                radius = math.sqrt(i ** 2 + j ** 2)
 
                 # Calculate angle swept
                 start_angle = math.atan2(current_y - center_y, current_x - center_x)
@@ -1353,7 +1369,7 @@ class FRCPostProcessor:
 
                 # Add Z component if helical
                 z_distance = abs(z - current_z)
-                total_distance = math.sqrt(arc_length**2 + z_distance**2)
+                total_distance = math.sqrt(arc_length ** 2 + z_distance ** 2)
 
                 cutting_time += total_distance / feed * 60  # Convert to seconds
 
@@ -1476,11 +1492,12 @@ class FRCPostProcessor:
                 is_circular = False
 
         # Calculate helical entry parameters
-        #helix_radius = self.tool_diameter * 0.75  # Small helix for entry
+        # helix_radius = self.tool_diameter * 0.75  # Small helix for entry
         helix_radius = self._compute_safe_helix_radius(entry_x, entry_y, offset_points)
 
         ramp_start_height = self.material_top + self.ramp_start_clearance
-        num_helical_passes, depth_per_pass = self._calculate_helical_passes(helix_radius, ramp_start_height=ramp_start_height)
+        num_helical_passes, depth_per_pass = self._calculate_helical_passes(helix_radius,
+                                                                            ramp_start_height=ramp_start_height)
 
         gcode.append(f"(Pocket with helical entry at center: {num_helical_passes} passes at {self.ramp_angle} deg)")
 
@@ -1495,7 +1512,11 @@ class FRCPostProcessor:
 
         for pass_num in range(num_helical_passes):
             target_z = ramp_start_height - (pass_num + 1) * depth_per_pass
-            gcode.append(f"G3 X{start_x:.4f} Y{start_y:.4f} I{-helix_radius:.4f} J0 Z{target_z:.4f} F{self.ramp_feed_rate}  ; Helical pass {pass_num + 1}/{num_helical_passes} CCW for climb milling")
+            gcode.append(
+                f"G3 X{start_x:.4f} Y{start_y:.4f} I{-helix_radius:.4f} J0 Z{target_z:.4f} F{self.ramp_feed_rate}  ; Helical pass {pass_num + 1}/{num_helical_passes} CCW for climb milling")
+
+        # After helix, we are now at the pocket cutting Z depth
+        pocket_cut_z = ramp_start_height - num_helical_passes * depth_per_pass
 
         # Return to center after helix
         gcode.append(f"G1 X{entry_x:.4f} Y{entry_y:.4f} F{self.feed_rate}  ; Return to pocket center")
@@ -1593,24 +1614,28 @@ class FRCPostProcessor:
 
                     gcode.append(f"(Contour pass {idx + 1}/{len(contours)})")
 
-                    # Move to start of contour
-                    gcode.append(f"G1 X{contour_points[0][0]:.4f} Y{contour_points[0][1]:.4f} F{self.feed_rate}")
+                    # Retract before repositioning to avoid cutting across the pocket/slot
+                    gcode.append(f"G0 Z{self.safe_height:.4f}  ; Retract to travel")
+                    gcode.append(
+                        f"G0 X{contour_points[0][0]:.4f} Y{contour_points[0][1]:.4f}  ; Rapid to contour start")
+                    gcode.append(f"G1 Z{pocket_cut_z:.4f} F{self.approach_rate}  ; Plunge back to pocket depth")
 
-                    # Cut the contour
+                    # Cut the contour at depth
                     for point in contour_points[1:]:
                         gcode.append(f"G1 X{point[0]:.4f} Y{point[1]:.4f} F{self.feed_rate}")
 
                     # Close the contour
                     gcode.append(f"G1 X{contour_points[0][0]:.4f} Y{contour_points[0][1]:.4f} F{self.feed_rate}")
 
-                    # Return to center between passes for safety
-                    # Retract + reposition between contour passes (avoid cutting across material)
+                    # Retract after each contour pass (stay safe between passes)
                     gcode.append(f"G0 Z{self.safe_height:.4f}  ; Retract between passes")
-                    gcode.append(f"G0 X{entry_x:.4f} Y{entry_y:.4f}  ; Move to safe center")
-                    gcode.append(f"G1 Z{target_z:.4f} F{self.approach_rate}  ; Plunge back to cut depth")
 
         # Final pass - cut actual perimeter at exact size
         gcode.append(f"(Final pass: cut exact perimeter)")
+        gcode.append(f"G0 Z{self.safe_height:.4f}  ; Retract before final perimeter")
+        gcode.append(f"G0 X{offset_points[0][0]:.4f} Y{offset_points[0][1]:.4f}  ; Rapid to perimeter start")
+        gcode.append(f"G1 Z{pocket_cut_z:.4f} F{self.approach_rate}  ; Plunge back to pocket depth")
+
         gcode.append(f"G1 X{offset_points[0][0]:.4f} Y{offset_points[0][1]:.4f} F{self.feed_rate}")
         for point in offset_points[1:]:
             gcode.append(f"G1 X{point[0]:.4f} Y{point[1]:.4f} F{self.feed_rate}")
@@ -1636,7 +1661,8 @@ class FRCPostProcessor:
 
         if num_passes > 1:
             actual_depth_per_pass = total_cut_depth / num_passes
-            gcode.append(f"(Multi-pass perimeter: {num_passes} passes @ {actual_depth_per_pass:.3f}\" each. Max {self.max_slotting_depth:.3f}\")")
+            gcode.append(
+                f"(Multi-pass perimeter: {num_passes} passes @ {actual_depth_per_pass:.3f}\" each. Max {self.max_slotting_depth:.3f}\")")
 
         # Create offset path (outward by tool radius)
         perimeter_poly = Polygon(perimeter_points)
@@ -1720,7 +1746,8 @@ class FRCPostProcessor:
                     tab_end = tab_center + half_tab_width
                     tab_zones.append((tab_start, tab_end))
 
-                gcode.append(f"(Tabs: {num_tabs} tabs - desired spacing: {self.tab_spacing:.2f}\", actual: {actual_tab_spacing:.2f}\" - width: {self.tab_width:.4f}\")")
+                gcode.append(
+                    f"(Tabs: {num_tabs} tabs - desired spacing: {self.tab_spacing:.2f}\", actual: {actual_tab_spacing:.2f}\" - width: {self.tab_width:.4f}\")")
 
             # Move to start
             start = offset_points[0]
@@ -1761,7 +1788,7 @@ class FRCPostProcessor:
 
             # Execute ramp moves using ramp feed rate
             for i, (x, y, z) in enumerate(ramp_points):
-                gcode.append(f"G1 X{x:.4f} Y{y:.4f} Z{z:.4f} F{self.ramp_feed_rate}  ; Ramp segment {i+1}")
+                gcode.append(f"G1 X{x:.4f} Y{y:.4f} Z{z:.4f} F{self.ramp_feed_rate}  ; Ramp segment {i + 1}")
 
             # Ensure we're at full depth
             if current_ramp_dist < ramp_distance:
@@ -1773,7 +1800,7 @@ class FRCPostProcessor:
 
                     if remaining_depth > 0.001:  # Only if significant depth remains
                         # Use small helical loop instead of straight plunge
-                        #helix_radius = self.tool_diameter * 0.75  # Small radius, safe for any geometry
+                        # helix_radius = self.tool_diameter * 0.75  # Small radius, safe for any geometry
                         helix_center_x = current_pos[0]
                         helix_center_y = current_pos[1]
                         helix_radius = self._compute_safe_helix_radius(helix_center_x, helix_center_y, offset_points)
@@ -1787,7 +1814,8 @@ class FRCPostProcessor:
                         num_loops = max(1, int(math.ceil(remaining_depth / depth_per_loop)))
                         depth_per_loop_actual = remaining_depth / num_loops
 
-                        gcode.append(f"(Perimeter too short - using helical finish: {num_loops} loop(s) at {self.ramp_angle} deg)")
+                        gcode.append(
+                            f"(Perimeter too short - using helical finish: {num_loops} loop(s) at {self.ramp_angle} deg)")
 
                         # Move to edge of helix radius
                         start_x = helix_center_x + helix_radius
@@ -1797,10 +1825,12 @@ class FRCPostProcessor:
                         # Perform helical loops
                         for loop_num in range(num_loops):
                             target_z = current_z - (loop_num + 1) * depth_per_loop_actual
-                            gcode.append(f"G3 X{start_x:.4f} Y{start_y:.4f} I{-helix_radius:.4f} J0 Z{target_z:.4f} F{self.ramp_feed_rate}  ; Helical loop {loop_num + 1}/{num_loops} CCW for climb milling")
+                            gcode.append(
+                                f"G3 X{start_x:.4f} Y{start_y:.4f} I{-helix_radius:.4f} J0 Z{target_z:.4f} F{self.ramp_feed_rate}  ; Helical loop {loop_num + 1}/{num_loops} CCW for climb milling")
 
                         # Return to perimeter path
-                        gcode.append(f"G1 X{helix_center_x:.4f} Y{helix_center_y:.4f} F{self.feed_rate}  ; Return to perimeter")
+                        gcode.append(
+                            f"G1 X{helix_center_x:.4f} Y{helix_center_y:.4f} F{self.feed_rate}  ; Return to perimeter")
 
             gcode.append("")
 
@@ -1959,7 +1989,7 @@ class FRCPostProcessor:
             if num_tabs % 2 == 1:
                 star_order.append(num_tabs - 1)
 
-            gcode.append(f"(Star pattern order: {', '.join(str(i+1) for i in star_order)})")
+            gcode.append(f"(Star pattern order: {', '.join(str(i + 1) for i in star_order)})")
             gcode.append("")
 
             # Remove each tab in star order
@@ -2000,6 +2030,7 @@ class FRCPostProcessor:
         Returns:
             Modified G-code line with offset coordinate
         """
+
         def replace_coord(match):
             coord_val = float(match.group(1))
             new_val = coord_val + offset
@@ -2085,7 +2116,7 @@ class FRCPostProcessor:
             return (1.0, 1.0)
 
     def _generate_parametric_tube_facing(self, tube_width: float, tube_height: float,
-                                          phase: int = 1) -> list[str]:
+                                         phase: int = 1) -> list[str]:
         """
         Generate tube facing toolpath - face the end of box tubing.
 
@@ -2139,7 +2170,7 @@ class FRCPostProcessor:
         arc_advance = 0.04  # How far each arc advances in X
         arc_radius = 0.05  # Arc radius
         half_advance = arc_advance / 2
-        j_offset = math.sqrt(arc_radius**2 - half_advance**2)
+        j_offset = math.sqrt(arc_radius ** 2 - half_advance ** 2)
 
         # Tool CENTER positions for tube facing:
         # - Coordinate system: +Y is INTO the tube (toward tube body)
@@ -2176,8 +2207,10 @@ class FRCPostProcessor:
         gcode.append(f'( Tube facing: {tube_width:.2f}" wide x {tube_height:.2f}" tall )')
         gcode.append(f'( Tool: {self.tool_diameter:.3f}" )')
         gcode.append(f'( Total depth: {total_depth:.3f}" )')
-        gcode.append(f'( Roughing: {num_roughing_passes} passes of {roughing_depth_per_pass:.3f}" each, +Y edge at Y={roughing_tool_edge:.4f}" )')
-        gcode.append(f'( Finishing: {num_finishing_passes} passes of {finishing_depth_per_pass:.3f}" each, +Y edge at Y={finishing_tool_edge:.4f}" )')
+        gcode.append(
+            f'( Roughing: {num_roughing_passes} passes of {roughing_depth_per_pass:.3f}" each, +Y edge at Y={roughing_tool_edge:.4f}" )')
+        gcode.append(
+            f'( Finishing: {num_finishing_passes} passes of {finishing_depth_per_pass:.3f}" each, +Y edge at Y={finishing_tool_edge:.4f}" )')
 
         # === ROUGHING PASSES ===
         arc_feed = self.feed_rate
@@ -2414,7 +2447,7 @@ class FRCPostProcessor:
         gcode.append('( === INITIALIZATION === )')
         gcode.append('G90 G94 G91.1 G40 G49 G17')
         gcode.append('G20')
-        #gcode.append('G0 G28 G91 Z0.  ; Home Z axis at rapid speed') split to multiple lines - TS
+        # gcode.append('G0 G28 G91 Z0.  ; Home Z axis at rapid speed') split to multiple lines - TS
         gcode.append("G91")
         gcode.append("G28 Z0.")
         gcode.append('G90  ; Back to absolute mode')
@@ -2532,9 +2565,9 @@ class FRCPostProcessor:
         )
 
     def generate_tube_pattern_gcode(self, tube_height: float,
-                                   square_end: bool, cut_to_length: bool,
-                                   tube_width: float = None, tube_length: float = None,
-                                   suggested_filename: str = None, timestamp: str = None) -> PostProcessorResult:
+                                    square_end: bool, cut_to_length: bool,
+                                    tube_width: float = None, tube_length: float = None,
+                                    suggested_filename: str = None, timestamp: str = None) -> PostProcessorResult:
         """
         Generate G-code for machining DXF pattern on both faces of a tube.
 
@@ -2666,7 +2699,8 @@ class FRCPostProcessor:
         y_offset_first_face = self.tube_facing_offset if square_end else 0.0
         gcode.append(f'( Y offset: +{y_offset_first_face:.3f}" [rough end will be milled back] )')
         gcode.append('')
-        gcode.extend(self._generate_toolpath_gcode(skip_perimeter=True, z_offset=z_offset, y_offset=y_offset_first_face))
+        gcode.extend(
+            self._generate_toolpath_gcode(skip_perimeter=True, z_offset=z_offset, y_offset=y_offset_first_face))
 
         # === CUT TO LENGTH - PHASE 1 ===
         if cut_to_length:
@@ -2818,7 +2852,8 @@ class FRCPostProcessor:
             }
         )
 
-    def _generate_toolpath_gcode(self, skip_perimeter: bool = False, z_offset: float = 0.0, y_offset: float = 0.0) -> list[str]:
+    def _generate_toolpath_gcode(self, skip_perimeter: bool = False, z_offset: float = 0.0, y_offset: float = 0.0) -> \
+    list[str]:
         """
         Generate toolpath G-code for the current DXF geometry.
 
@@ -2835,7 +2870,7 @@ class FRCPostProcessor:
                 toolpath.extend(self._generate_hole_gcode(
                     hole['center'][0],  # cx
                     hole['center'][1],  # cy
-                    hole['diameter']    # diameter
+                    hole['diameter']  # diameter
                 ))
 
         # Generate toolpaths for pockets
@@ -2932,11 +2967,13 @@ class FRCPostProcessor:
         Returns:
             Modified G-code line with mirrored X coordinates
         """
+
         # Mirror X coordinates
         def replace_x(match):
             x_val = float(match.group(1))
             new_x = tube_width - x_val
             return f'X{new_x:.4f}'
+
         line = re.sub(r'X(-?\d+\.?\d*)', replace_x, line)
 
         # Flip I offset sign (X component of arc center)
@@ -2944,6 +2981,7 @@ class FRCPostProcessor:
             i_val = float(match.group(1))
             new_i = -i_val
             return f'I{new_i:.4f}'
+
         line = re.sub(r'I(-?\d+\.?\d*)', replace_i, line)
 
         return line
@@ -2972,7 +3010,7 @@ class FRCPostProcessor:
         return self._offset_coordinate(line, 'Y', y_offset)
 
     def _generate_cut_to_length(self, tube_width: float, tube_height: float,
-                                 tube_length: float, phase: int) -> list[str]:
+                                tube_length: float, phase: int) -> list[str]:
         """
         Generate G-code to cut tube to length using arc clearing pattern.
 
@@ -3032,7 +3070,7 @@ class FRCPostProcessor:
         arc_advance = 0.04  # How far each arc advances in X
         arc_radius = 0.05  # Arc radius
         half_advance = arc_advance / 2
-        j_offset = math.sqrt(arc_radius**2 - half_advance**2)
+        j_offset = math.sqrt(arc_radius ** 2 - half_advance ** 2)
 
         # Tool CENTER positions for cut to length:
         # - The kept part is at Y < y_cut, waste is at Y > y_cut
@@ -3069,8 +3107,10 @@ class FRCPostProcessor:
         gcode.append(f'( Tube width: {tube_width:.2f}" x height: {tube_height:.2f}" )')
         gcode.append(f'( Tool: {self.tool_diameter:.3f}" )')
         gcode.append(f'( Total depth: {total_depth:.3f}" )')
-        gcode.append(f'( Roughing: {num_roughing_passes} passes of {roughing_depth_per_pass:.3f}" each, leaves {finish_stock:.4f}" for finishing )')
-        gcode.append(f'( Finishing: {num_finishing_passes} passes of {finishing_depth_per_pass:.3f}" each, -Y edge at Y={y_cut:.4f}" )')
+        gcode.append(
+            f'( Roughing: {num_roughing_passes} passes of {roughing_depth_per_pass:.3f}" each, leaves {finish_stock:.4f}" for finishing )')
+        gcode.append(
+            f'( Finishing: {num_finishing_passes} passes of {finishing_depth_per_pass:.3f}" each, -Y edge at Y={y_cut:.4f}" )')
         gcode.append('')
 
         # === ROUGHING PASSES ===
@@ -3226,49 +3266,49 @@ def main():
     parser.add_argument('input_dxf', nargs='?', help='Input DXF file from Onshape (not needed for tube-facing mode)')
     parser.add_argument('output_gcode', help='Output G-code file')
     parser.add_argument('--mode', type=str, default='standard',
-                       choices=['standard', 'tube-facing', 'tube-pattern'],
-                       help='Operation mode: standard (DXF processing), tube-facing (square tube ends), or tube-pattern (DXF pattern on tube faces)')
+                        choices=['standard', 'tube-facing', 'tube-pattern'],
+                        help='Operation mode: standard (DXF processing), tube-facing (square tube ends), or tube-pattern (DXF pattern on tube faces)')
     parser.add_argument('--tube-size', type=str, default='1x1',
-                       choices=['1x1', '2x1-standing', '2x1-flat'],
-                       help='Tube size for tube-facing mode')
+                        choices=['1x1', '2x1-standing', '2x1-flat'],
+                        help='Tube size for tube-facing mode')
     parser.add_argument('--tube-height', type=float, default=1.0,
-                       help='Tube Z-height in inches for tube-pattern mode (default: 1.0)')
+                        help='Tube Z-height in inches for tube-pattern mode (default: 1.0)')
     parser.add_argument('--tube-width', type=float,
-                       help='Tube face width (X dimension) in inches for tube-pattern mode (optional, calculated from DXF if not provided)')
+                        help='Tube face width (X dimension) in inches for tube-pattern mode (optional, calculated from DXF if not provided)')
     parser.add_argument('--tube-length', type=float,
-                       help='Tube face length (Y dimension) in inches for tube-pattern mode (optional, calculated from DXF if not provided)')
+                        help='Tube face length (Y dimension) in inches for tube-pattern mode (optional, calculated from DXF if not provided)')
     parser.add_argument('--square-end', action='store_true',
-                       help='Square the tube end before machining pattern (tube-pattern mode)')
+                        help='Square the tube end before machining pattern (tube-pattern mode)')
     parser.add_argument('--cut-to-length', action='store_true',
-                       help='Machine tube to length after pattern (tube-pattern mode)')
+                        help='Machine tube to length after pattern (tube-pattern mode)')
     parser.add_argument('--material', type=str, default='plywood',
-                       help='Material preset (default: plywood). Built-in: plywood, aluminum, polycarbonate. Custom materials from config also supported.')
+                        help='Material preset (default: plywood). Built-in: plywood, aluminum, polycarbonate. Custom materials from config also supported.')
     parser.add_argument('--thickness', type=float, default=0.25,
-                       help='Material thickness in inches (default: 0.25)')
+                        help='Material thickness in inches (default: 0.25)')
     parser.add_argument('--tool-diameter', type=float, default=0.157,
-                       help='Tool diameter in inches (default: 0.157" = 4mm)')
+                        help='Tool diameter in inches (default: 0.157" = 4mm)')
     parser.add_argument('--sacrifice-depth', type=float, default=0.02,
-                       help='How far to cut into sacrifice board in inches (default: 0.02")')
+                        help='How far to cut into sacrifice board in inches (default: 0.02")')
     parser.add_argument('--units', choices=['inch', 'mm'], default='inch',
-                       help='Units (default: inch)')
+                        help='Units (default: inch)')
     parser.add_argument('--tab-spacing', type=float, default=6.0,
-                       help='Desired spacing between tabs in inches (default: 6.0, minimum 3 tabs)')
+                        help='Desired spacing between tabs in inches (default: 6.0, minimum 3 tabs)')
     parser.add_argument('--origin-corner', default='bottom-left',
-                       choices=['bottom-left', 'bottom-right', 'top-left', 'top-right'],
-                       help='Which corner should be origin (0,0) - default: bottom-left')
+                        choices=['bottom-left', 'bottom-right', 'top-left', 'top-right'],
+                        help='Which corner should be origin (0,0) - default: bottom-left')
     parser.add_argument('--rotation', type=int, default=0,
-                       choices=[0, 90, 180, 270],
-                       help='Rotation angle in degrees clockwise (default: 0)')
+                        choices=[0, 90, 180, 270],
+                        help='Rotation angle in degrees clockwise (default: 0)')
     parser.add_argument('--user', type=str, default=None,
-                       help='User name for G-code header (from Google OAuth)')
+                        help='User name for G-code header (from Google OAuth)')
 
     # NEW: Cutting parameters
     parser.add_argument('--spindle-speed', type=int, default=18000,
-                       help='Spindle speed in RPM (default: 18000)')
+                        help='Spindle speed in RPM (default: 18000)')
     parser.add_argument('--feed-rate', type=float, default=None,
-                       help='Feed rate (default: 14 ipm or 365 mm/min depending on units)')
+                        help='Feed rate (default: 14 ipm or 365 mm/min depending on units)')
     parser.add_argument('--plunge-rate', type=float, default=None,
-                       help='Plunge rate (default: 10 ipm or 339 mm/min depending on units)')
+                        help='Plunge rate (default: 10 ipm or 339 mm/min depending on units)')
 
     args = parser.parse_args()
 
@@ -3301,7 +3341,8 @@ def main():
         print(f'Tube facing G-code generated for {args.tube_size} tube')
         print(f"\nIdentified 0 millable holes and 0 pockets")
         print(f"Total lines: {result.stats['total_lines']}")
-        print(f"\n⏱️  ESTIMATED_CYCLE_TIME: {result.stats['cycle_time_seconds']:.1f} seconds ({result.stats['cycle_time_display']})")
+        print(
+            f"\n⏱️  ESTIMATED_CYCLE_TIME: {result.stats['cycle_time_seconds']:.1f} seconds ({result.stats['cycle_time_display']})")
         print(f'\nSETUP:')
         for instruction in result.stats['setup_instructions']:
             print(f'  {instruction}')
@@ -3372,9 +3413,11 @@ def main():
         # Print output for CLI
         print(f'OUTPUT_FILE:{output_path}')
         print(f'Tube pattern G-code generated')
-        print(f"\nIdentified {result.stats['num_holes_per_face']} millable holes and {result.stats['num_pockets_per_face']} pockets on each face")
+        print(
+            f"\nIdentified {result.stats['num_holes_per_face']} millable holes and {result.stats['num_pockets_per_face']} pockets on each face")
         print(f"Total lines: {result.stats['total_lines']}")
-        print(f"\n⏱️  ESTIMATED_CYCLE_TIME: {result.stats['cycle_time_seconds']:.1f} seconds ({result.stats['cycle_time_display']})")
+        print(
+            f"\n⏱️  ESTIMATED_CYCLE_TIME: {result.stats['cycle_time_seconds']:.1f} seconds ({result.stats['cycle_time_display']})")
         print(f'\nSETUP:')
         for instruction in result.stats['setup_instructions']:
             print(f'  {instruction}')
@@ -3447,7 +3490,8 @@ def main():
         print(f"  Tool radius: {pp.tool_radius:.4f}\"")
         print(f"  Perimeter: offset OUTWARD by {pp.tool_radius:.4f}\"")
         print(f"  Pockets: offset INWARD by {pp.tool_radius:.4f}\"")
-        print(f"  Holes: toolpath radius reduced by {pp.tool_radius:.4f}\" (holes < {pp.min_millable_hole:.3f}\" skipped)")
+        print(
+            f"  Holes: toolpath radius reduced by {pp.tool_radius:.4f}\" (holes < {pp.min_millable_hole:.3f}\" skipped)")
 
 
 if __name__ == '__main__':
