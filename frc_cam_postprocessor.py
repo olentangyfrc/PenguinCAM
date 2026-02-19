@@ -152,15 +152,16 @@ class FRCPostProcessor:
         self.errors = []  # Collect validation errors during processing
 
     def apply_material_preset(self, material: str, machine_id: Optional[str] = None):
-        """
-        Apply a material preset to set feeds, speeds, and ramp angles.
+        # If config exists, let it override defaults; otherwise use built-ins
+        preset = None
+        if self.config is not None:
+            preset = self.config.get_material_preset(material, machine_id)
 
-        Args:
-            material: Material name ('plywood', 'aluminum', 'polycarbonate', or custom)
-            machine_id: Optional machine ID for machine-specific settings
-        """
-        # Get material preset from config (merges user config with Team 6238 defaults)
-        preset = self.config.get_material_preset(material, machine_id)
+        # Fallback to built-in presets
+        if not preset:
+            if material not in MATERIAL_PRESETS:
+                material = "plywood"
+            preset = MATERIAL_PRESETS[material]
 
         # Check if we got a valid preset (config returns empty dict for unknown materials)
         if not preset:

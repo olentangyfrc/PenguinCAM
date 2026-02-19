@@ -380,7 +380,7 @@ def generate_onshape_filename(doc_name, part_name):
 # ============================================================================
 # Routes
 # ============================================================================
-from flask import send_from_directory
+
 
 @app.get("/onshape/app.js")
 def onshape_app_js():
